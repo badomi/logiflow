@@ -313,6 +313,9 @@ function renderReplySection(candidates: ReplyCandidate[]) {
   const section = document.getElementById("reply-section")!;
   const list = document.getElementById("reply-candidates")!;
   section.hidden = false;
+  // 담당자 자신이 보낸 메일(참조 사본 등)을 화주 회신으로 잘못 병합하지 않도록 경고한다
+  const fromMe = current?.snapshot.from.email.toLowerCase() === currentUserEmail().toLowerCase();
+  document.getElementById("reply-warning")!.hidden = !(fromMe && candidates.length > 0);
 
   for (const candidate of candidates) {
     const item = document.createElement("li");

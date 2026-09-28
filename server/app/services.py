@@ -158,6 +158,9 @@ def match_reply(session: Session, snapshot: MailSnapshot) -> ReplyMatchResult:
     근거가 강한 순서: 제목의 케이스 ID(1.0) > 메일 헤더 In-Reply-To·References(0.9) > Outlook 대화 ID(0.7)
     """
     registered = find_registered_mail(session, snapshot.internet_message_id)
+    if registered is None and is_leona_sent_mail(session, snapshot.internet_message_id):
+        # LEONA 담당자가 보낸 메일 자체(보낸 편지함·자기 사본)는 회신이 아니다
+        return ReplyMatchResult(already_registered_case_id=None, candidates=[])
     candidates: dict[str, ReplyCandidate] = {}
 
     def add(case: Case, score: float, reason: str) -> None:
@@ -194,11 +197,24 @@ def match_reply(session: Session, snapshot: MailSnapshot) -> ReplyMatchResult:
     )
 
 
+def is_leona_sent_mail(session: Session, internet_message_id: str | None) -> bool:
+    """발송 기록(MAIL_SENT)에 남은 Message-ID인지 — 즉 LEONA가 보낸 메일 그 자체인지."""
+    message_id = normalize_message_id(internet_message_id)
+    if message_id is None:
+        return False
+    for detail in session.scalars(select(CaseEvent.detail).where(CaseEvent.event_type == "MAIL_SENT")):
+        if detail and json.loads(detail).get("messageId") == message_id:
+            return True
+    return False
+
+
 def merge_reply(
     session: Session, case_id: str, parsed: ParsedMail, raw: bytes | None, source: str, actor: str | None
 ) -> Case:
     """담당자가 확인한 케이스에 회신을 합치고, 추출→검증을 다시 실행한다 (FR-104·FR-207)."""
     case = get_case(session, case_id)
+    if is_leona_sent_mail(session, parsed.snapshot.internet_message_id):
+        raise ConflictError("LEONA가 보낸 메일입니다. 화주 회신만 병합할 수 있습니다.")
     existing = find_registered_mail(session, parsed.snapshot.internet_message_id)
     if existing is not None:
         if existing.case_pk == case.id:

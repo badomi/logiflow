@@ -104,6 +104,15 @@ body {
   color: #605e5c;
 }
 
+.warning {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  background: #fff4ce;
+  color: #7a5c00;
+  font-size: 12px;
+  border-radius: 4px;
+}
+
 .label {
   display: block;
   margin-bottom: 4px;

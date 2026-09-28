@@ -122,6 +122,22 @@ def test_sent_time_taken_from_eml_date_header(client):
     assert events[-1]["detail"]["sentAt"] == "2026-09-29T00:00:00+00:00"
 
 
+def test_leona_sent_mail_is_not_a_reply(client):
+    """발송 기록된 LEONA 메일(자기 사본)은 회신 후보로 나오지 않고 병합도 막힌다 — 실제 테스트에서 발견한 오병합 방지."""
+    case_id = make_case(client)
+    sent_id = "<leona-sent-1@leona.example.com>"
+    client.post(
+        f"/api/cases/{case_id}/mail-events",
+        json={"eventType": "MAIL_SENT", "subject": f"RE: [{case_id}] 견적 보완 요청", "internetMessageId": sent_id},
+    )
+    copy = {"snapshot": {"subject": f"RE: [{case_id}] 견적 보완 요청", "internetMessageId": sent_id}}
+    assert client.post("/api/replies/match", json=copy).json()["candidates"] == []
+    assert client.post(f"/api/cases/{case_id}/replies", json=copy).status_code == 409
+
+    reply = {"snapshot": {"subject": f"Re: [{case_id}] 견적 보완 요청", "internetMessageId": "<customer-reply@x.com>"}}
+    assert client.post("/api/replies/match", json=reply).json()["candidates"][0]["caseId"] == case_id
+
+
 def test_unknown_mail_event_rejected(client):
     case_id = make_case(client)
     res = client.post(f"/api/cases/{case_id}/mail-events", json={"eventType": "AUTO_SEND"})
