@@ -38,10 +38,21 @@ export interface ReplyMatchResult {
 
 export class ApiError extends Error {}
 
+/**
+ * API 주소. 패널·작성 창(HTML)에서는 자기 주소(https://localhost:3000)를 쓰고,
+ * 주소가 없는 실행 환경(데스크톱 Outlook의 JavaScript 전용 런타임)에서는 개발 서버 주소를 쓴다.
+ */
+const API_ORIGIN =
+  typeof location !== "undefined" && location.origin.startsWith("http") ? location.origin : "https://localhost:3000";
+
+export function apiUrl(path: string): string {
+  return path.startsWith("/api") ? `${API_ORIGIN}${path}` : `${API_ORIGIN}/api${path}`;
+}
+
 async function request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`/api${path}`, {
+    response = await fetch(apiUrl(path), {
       method,
       headers: body ? { "Content-Type": "application/json" } : undefined,
       body: body ? JSON.stringify(body) : undefined,
@@ -72,6 +83,52 @@ export function matchReply(input: MailInput) {
 /** [회신 병합] FR-104·207 — 담당자가 고른 케이스에 합친다 */
 export function mergeReply(caseId: string, input: MailInput) {
   return request<CaseDetail>("POST", `/cases/${encodeURIComponent(caseId)}/replies`, input);
+}
+
+export interface Draft {
+  kind: "SUPPLEMENT" | "QUOTE";
+  to: { name: string; email: string }[];
+  subject: string;
+  htmlBody: string;
+  attachments: { filename: string; url: string; size: number }[];
+}
+
+/** [보완 요청 초안] FR-304·305 — 초안 내용만 받는다. 발송 기능은 없다 */
+export function supplementDraft(caseId: string, questions: string[], actor: string) {
+  return request<Draft>("POST", `/cases/${encodeURIComponent(caseId)}/drafts/supplement`, { questions, actor });
+}
+
+/** [견적서 송부 초안] FR-505 */
+export function quoteDraft(caseId: string, actor: string) {
+  return request<Draft>("POST", `/cases/${encodeURIComponent(caseId)}/drafts/quote`, { actor });
+}
+
+/** [초안 저장·발송 기록] FR-505 — 기록만 한다. 발송은 담당자가 Outlook에서 직접 누른다 */
+export function recordMailEvent(
+  caseId: string,
+  eventType: "DRAFT_SAVED" | "MAIL_SENT",
+  subject: string,
+  actor: string,
+  kind?: string
+) {
+  return request<CaseDetail>("POST", `/cases/${encodeURIComponent(caseId)}/mail-events`, {
+    eventType,
+    kind,
+    subject,
+    actor,
+  });
+}
+
+/** 견적서 파일을 Base64로 받아 온다 (작성 창에 첨부하기 위해) */
+export async function fetchFileBase64(url: string): Promise<string> {
+  const response = await fetch(apiUrl(url));
+  if (!response.ok) throw new ApiError(`첨부파일을 받지 못했습니다 (${response.status})`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
 }
 
 /** 최근 케이스 목록 — 자동 식별 실패 시 직접 선택용 */

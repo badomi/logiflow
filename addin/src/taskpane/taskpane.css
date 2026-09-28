@@ -104,6 +104,26 @@ body {
   color: #605e5c;
 }
 
+.label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: #605e5c;
+}
+
+textarea {
+  box-sizing: border-box;
+  width: 100%;
+  font: inherit;
+}
+
+.buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 #manual-select select {
   width: 100%;
   margin: 8px 0;

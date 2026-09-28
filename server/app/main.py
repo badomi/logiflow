@@ -6,13 +6,24 @@ API 문서(자동 생성): http://localhost:8000/docs
 
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from . import services
+from . import drafts, services
 from .db import get_session, init_db
-from .schemas import CaseDetail, CaseSummary, CreateCaseResult, MailInput, ReplyMatchResult
+from .schemas import (
+    ActorRequest,
+    CaseDetail,
+    CaseSummary,
+    CreateCaseResult,
+    DraftOut,
+    MailEventRequest,
+    MailInput,
+    ReplyMatchResult,
+    SupplementRequest,
+)
 
 
 @asynccontextmanager
@@ -78,6 +89,61 @@ def match_reply(body: MailInput, session: Session = Depends(get_session)):
     except services.InputError as error:
         raise _http_error(error) from error
     return services.match_reply(session, parsed.snapshot)
+
+
+@app.post("/api/cases/{case_id}/drafts/supplement", response_model=DraftOut)
+def supplement_draft(case_id: str, body: SupplementRequest, session: Session = Depends(get_session)):
+    """[보완 요청 초안] 제목에 케이스 ID, 누락 문항만 번호로 나열, 국·영문 병기 (FR-304·305·510)."""
+    try:
+        case = services.get_case(session, case_id)
+        return drafts.supplement_draft(session, case, body.questions, body.actor)
+    except (services.NotFoundError, drafts.DraftError) as error:
+        raise _http_error(error) from error
+
+
+@app.post("/api/cases/{case_id}/drafts/quote", response_model=DraftOut)
+def quote_draft(case_id: str, body: ActorRequest, session: Session = Depends(get_session)):
+    """[견적서 송부 초안] 견적서 PDF·XLSX 첨부 (FR-505)."""
+    try:
+        case = services.get_case(session, case_id)
+        return drafts.quote_draft(session, case, body.actor)
+    except (services.NotFoundError, drafts.DraftError) as error:
+        raise _http_error(error) from error
+
+
+@app.post("/api/cases/{case_id}/mail-events", response_model=CaseDetail)
+def mail_event(case_id: str, body: MailEventRequest, session: Session = Depends(get_session)):
+    """[초안 저장·발송 기록] Outlook 작성 창과 보내기 이벤트가 호출한다. 기록만 하고 발송하지 않는다 (FR-505)."""
+    try:
+        case = services.get_case(session, case_id)
+        drafts.record_mail_event(session, case, body.event_type, body.kind, body.subject, body.actor)
+    except (services.NotFoundError, drafts.DraftError) as error:
+        raise _http_error(error) from error
+    return services.case_detail(case)
+
+
+@app.post("/api/cases/{case_id}/quotes")
+async def upload_quote(case_id: str, file: UploadFile, session: Session = Depends(get_session)):
+    """견적서 파일 등록. C트랙 견적서 생성(FR-504) 결과를 케이스에 붙이는 입구 (연결 전에는 테스트용)."""
+    try:
+        case = services.get_case(session, case_id)
+        path = drafts.save_quote_file(case, file.filename or "quote.pdf", await file.read())
+    except (services.NotFoundError, drafts.DraftError) as error:
+        raise _http_error(error) from error
+    return {"path": path}
+
+
+@app.get("/api/cases/{case_id}/quotes/{filename}")
+def download_quote(case_id: str, filename: str, session: Session = Depends(get_session)):
+    """패널이 초안에 첨부할 견적서를 내려받는다. 케이스의 견적서 폴더에 있는 파일만 준다."""
+    try:
+        case = services.get_case(session, case_id)
+    except services.NotFoundError as error:
+        raise _http_error(error) from error
+    match = next((f for f in drafts.quote_files(case) if f.name == filename), None)
+    if match is None:
+        raise HTTPException(status_code=404, detail="견적서 파일이 없습니다.")
+    return FileResponse(match, filename=match.name)
 
 
 @app.post("/api/cases/{case_id}/replies", response_model=CaseDetail)

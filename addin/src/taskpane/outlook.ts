@@ -1,7 +1,8 @@
 /* global document, Office */
 
-import { ApiError, createCase, listCases, matchReply, mergeReply } from "./api";
-import type { MailInput, ReplyCandidate } from "./api";
+import { savePendingDraft } from "../shared/handoff";
+import { ApiError, createCase, listCases, matchReply, mergeReply, quoteDraft, supplementDraft } from "./api";
+import type { Draft, MailInput, ReplyCandidate } from "./api";
 import { currentUserEmail, readSelectedMail, readSelectedMailRaw } from "./mail";
 import type { MailSnapshot } from "./mail";
 
@@ -16,6 +17,8 @@ const REASON_LABELS: Record<string, string> = {
 
 /** 지금 패널에 떠 있는 메일의 요청 데이터 (버튼을 누를 때 다시 읽지 않도록 보관) */
 let current: MailInput | null = null;
+/** 지금 메일이 속한 케이스 ID (등록된 경우에만) */
+let currentCaseId: string | null = null;
 /** 메일을 빠르게 바꿀 때, 늦게 끝난 이전 메일 결과가 화면을 덮어쓰지 않게 하는 번호 */
 let loadToken = 0;
 
@@ -30,6 +33,8 @@ Office.onReady((info) => {
     const select = document.getElementById("case-select") as HTMLSelectElement;
     if (select.value) onMerge(select.value);
   };
+  document.getElementById("supplement-draft")!.onclick = onSupplementDraft;
+  document.getElementById("quote-draft")!.onclick = onQuoteDraft;
 
   // 패널을 고정(pin)해 두면, 담당자가 다른 메일을 선택할 때마다 새로 읽는다 (사용자 선택 이벤트 — 폴링 아님)
   if (Office.context.requirements.isSetSupported("Mailbox", "1.5")) {
@@ -109,6 +114,55 @@ async function onMerge(caseId: string) {
   }
 }
 
+async function onSupplementDraft() {
+  if (!currentCaseId) return;
+  const caseId = currentCaseId;
+  const questions = (document.getElementById("questions") as HTMLTextAreaElement).value.split("\n");
+  await openDraft(
+    () => supplementDraft(caseId, questions, currentUserEmail()),
+    // 보완 요청은 원래 메일에 대한 '회신'으로 연다 → 스레드가 이어져 화주 회신을 헤더로도 찾을 수 있다 (FR-104)
+    (draft) => {
+      savePendingDraft({ caseId, kind: "SUPPLEMENT", subject: `RE: ${draft.subject}`, attachments: [] });
+      Office.context.mailbox.item!.displayReplyForm({ htmlBody: draft.htmlBody });
+    }
+  );
+}
+
+async function onQuoteDraft() {
+  if (!currentCaseId) return;
+  const caseId = currentCaseId;
+  await openDraft(
+    () => quoteDraft(caseId, currentUserEmail()),
+    (draft) => {
+      // 첨부는 작성 창이 열린 뒤 이벤트 처리기가 붙인다 (Outlook 웹은 localhost 파일 주소를 직접 못 가져온다)
+      savePendingDraft({ caseId, kind: "QUOTE", subject: draft.subject, attachments: draft.attachments });
+      Office.context.mailbox.displayNewMessageForm({
+        toRecipients: draft.to.map((a) => a.email),
+        subject: draft.subject,
+        htmlBody: draft.htmlBody,
+      });
+    }
+  );
+}
+
+/**
+ * 백엔드가 만든 초안 내용으로 Outlook 작성 창을 띄운다.
+ * 작성 창이 열리면 이벤트 처리기(commands)가 제목·첨부를 마무리하고 초안함에 저장한다.
+ * 보내기 버튼은 담당자가 직접 누른다 (자동 발송 없음).
+ */
+async function openDraft(load: () => Promise<Draft>, open: (draft: Draft) => void) {
+  setBusy(true);
+  setStatus("초안을 준비하는 중…", "info");
+  try {
+    open(await load());
+    setStatus("작성 창을 열었습니다. 초안함에 저장되며, 내용을 확인한 뒤 직접 보내기를 눌러 주세요.", "success");
+  } catch (error) {
+    setStatus(messageOf(error), "error");
+  } finally {
+    setBusy(false);
+  }
+}
+
 // ---------------------------------------------------------------- 화면 그리기
 
 function renderMail(mail: MailSnapshot) {
@@ -122,8 +176,10 @@ function renderMail(mail: MailSnapshot) {
 }
 
 function resetCaseArea() {
+  currentCaseId = null;
   setText("case-state", "");
   showCreateButton(false);
+  document.getElementById("draft-section")!.hidden = true;
   document.getElementById("reply-section")!.hidden = true;
   document.getElementById("reply-candidates")!.replaceChildren();
 }
@@ -133,7 +189,9 @@ function renderCaseState(registeredCaseId: string | null, candidates: ReplyCandi
   resetCaseArea();
 
   if (registeredCaseId) {
+    currentCaseId = registeredCaseId;
     setText("case-state", `이 메일은 케이스 ${registeredCaseId}에 등록되어 있습니다.`);
+    document.getElementById("draft-section")!.hidden = false;
     return;
   }
 

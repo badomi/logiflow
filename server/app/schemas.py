@@ -87,6 +87,40 @@ class ReplyCandidate(CamelModel):
     reasons: list[str]  # SUBJECT_CASE_ID / HEADER / CONVERSATION
 
 
+class DraftAttachment(CamelModel):
+    filename: str
+    url: str  # 패널이 내려받을 백엔드 경로
+    size: int
+
+
+class DraftOut(CamelModel):
+    """메일 초안 내용. 패널이 이 값으로 Outlook 작성 창을 띄우고, 발송은 담당자가 한다."""
+
+    kind: str  # SUPPLEMENT(보완 요청) / QUOTE(견적서 송부)
+    to: list[Address]
+    subject: str
+    html_body: str
+    attachments: list[DraftAttachment]
+
+
+class SupplementRequest(CamelModel):
+    questions: list[str]  # C트랙 검증 결과의 보완 문항 (연결 전에는 담당자 입력)
+    actor: str | None = None
+
+
+class ActorRequest(CamelModel):
+    actor: str | None = None
+
+
+class MailEventRequest(CamelModel):
+    """Outlook 작성 창·보내기 이벤트가 알려 주는 기록 (FR-505 발송 시각·수행자)."""
+
+    event_type: str  # DRAFT_SAVED(초안함 저장) / MAIL_SENT(담당자가 보내기를 누름)
+    kind: str | None = None  # SUPPLEMENT / QUOTE (제목으로 판별 못 하면 비움)
+    subject: str = ""
+    actor: str | None = None
+
+
 class ReplyMatchResult(CamelModel):
     already_registered_case_id: str | None  # 이 메일이 이미 어떤 케이스에 들어가 있으면 그 ID
     candidates: list[ReplyCandidate]

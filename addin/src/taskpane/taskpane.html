@@ -33,6 +33,17 @@
             <button id="create-case" class="button button--primary" hidden>케이스 생성</button>
         </section>
 
+        <!-- 초안 만들기 (FR-304·505): Outlook 작성 창을 띄우기만 하고, 발송은 담당자가 직접 한다 -->
+        <section id="draft-section" class="card" hidden>
+            <h2>메일 초안</h2>
+            <label for="questions" class="label">보완 요청 문항 (한 줄에 하나 · C트랙 검증 연결 전 임시 입력)</label>
+            <textarea id="questions" rows="4" placeholder="예) 선적항(POL)을 알려 주세요."></textarea>
+            <div class="buttons">
+                <button id="supplement-draft" class="button">보완 요청 초안 열기</button>
+                <button id="quote-draft" class="button">견적서 송부 초안 열기</button>
+            </div>
+        </section>
+
         <!-- 회신 연결 (FR-104): 자동 후보 → 담당자가 골라 병합, 후보가 없으면 직접 선택 -->
         <section id="reply-section" class="card" hidden>
             <h2>회신으로 병합</h2>
