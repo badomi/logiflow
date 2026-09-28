@@ -1,7 +1,16 @@
 /* global document, Office */
 
 import { savePendingDraft } from "../shared/handoff";
-import { ApiError, createCase, listCases, matchReply, mergeReply, quoteDraft, supplementDraft } from "./api";
+import {
+  ApiError,
+  createCase,
+  listCases,
+  matchReply,
+  mergeReply,
+  quoteDraft,
+  recordMailEvent,
+  supplementDraft,
+} from "./api";
 import type { Draft, MailInput, ReplyCandidate } from "./api";
 import { currentUserEmail, readSelectedMail, readSelectedMailRaw } from "./mail";
 import type { MailSnapshot } from "./mail";
@@ -19,6 +28,10 @@ const REASON_LABELS: Record<string, string> = {
 let current: MailInput | null = null;
 /** 지금 메일이 속한 케이스 ID (등록된 경우에만) */
 let currentCaseId: string | null = null;
+/** 지금 메일이 담당자가 보낸 케이스 메일일 때 그 케이스 ID */
+let sentCaseId: string | null = null;
+
+const CASE_ID_PATTERN = /LQ-\d{4}-\d{4}-\d{3}/;
 /** 메일을 빠르게 바꿀 때, 늦게 끝난 이전 메일 결과가 화면을 덮어쓰지 않게 하는 번호 */
 let loadToken = 0;
 
@@ -33,6 +46,7 @@ Office.onReady((info) => {
     const select = document.getElementById("case-select") as HTMLSelectElement;
     if (select.value) onMerge(select.value);
   };
+  document.getElementById("record-sent")!.onclick = onRecordSent;
   document.getElementById("supplement-draft")!.onclick = onSupplementDraft;
   document.getElementById("quote-draft")!.onclick = onQuoteDraft;
 
@@ -67,6 +81,7 @@ async function loadCurrentItem() {
     const match = await matchReply(current);
     if (token !== loadToken) return;
     renderCaseState(match.alreadyRegisteredCaseId, match.candidates);
+    renderSentState(snapshot);
     setStatus("", "info");
   } catch (error) {
     if (token !== loadToken) return;
@@ -107,6 +122,41 @@ async function onMerge(caseId: string) {
     await mergeReply(caseId, current);
     renderCaseState(caseId, []);
     setStatus(`${caseId} 케이스에 회신을 병합했습니다. 추출·검증을 다시 실행했습니다.`, "success");
+  } catch (error) {
+    setStatus(messageOf(error), "error");
+  } finally {
+    setBusy(false);
+  }
+}
+
+/**
+ * 담당자 본인이 보낸 [케이스ID] 메일이면 [발송 기록] 버튼을 보여준다 (FR-505).
+ * 보내기 이벤트(OnMessageSend)가 동작하지 않는 환경을 위한 보조 경로다. 기록은 메일의 실제 발송 시각으로 남는다.
+ */
+function renderSentState(mail: MailSnapshot) {
+  const caseId = mail.subject.match(CASE_ID_PATTERN)?.[0];
+  const mine = mail.from.email.toLowerCase() === currentUserEmail().toLowerCase();
+  const section = document.getElementById("sent-section")!;
+  section.hidden = !(caseId && mine);
+  if (!section.hidden) {
+    setText("sent-state", `담당자가 보낸 ${caseId} 케이스 메일입니다. 발송 이력에 남기려면 누르세요.`);
+    sentCaseId = caseId!;
+    // 보낸 메일은 새 케이스·회신 병합 대상이 아니다 (단, 본인에게 보내는 테스트에서는 아래 '직접 선택'으로 병합 가능)
+    showCreateButton(false);
+    setText("case-state", "");
+  }
+}
+
+async function onRecordSent() {
+  if (!current || !sentCaseId) return;
+  const mail = current.snapshot;
+  setBusy(true);
+  try {
+    await recordMailEvent(sentCaseId, "MAIL_SENT", mail.subject, currentUserEmail(), undefined, {
+      internetMessageId: mail.internetMessageId,
+      occurredAt: mail.receivedAt,
+    });
+    setStatus(`${sentCaseId} 발송 이력을 기록했습니다 (발송 시각 ${new Date(mail.receivedAt).toLocaleString("ko-KR")}).`, "success");
   } catch (error) {
     setStatus(messageOf(error), "error");
   } finally {
@@ -177,6 +227,8 @@ function renderMail(mail: MailSnapshot) {
 
 function resetCaseArea() {
   currentCaseId = null;
+  sentCaseId = null;
+  document.getElementById("sent-section")!.hidden = true;
   setText("case-state", "");
   showCreateButton(false);
   document.getElementById("draft-section")!.hidden = true;

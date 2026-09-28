@@ -109,13 +109,15 @@ export function recordMailEvent(
   eventType: "DRAFT_SAVED" | "MAIL_SENT",
   subject: string,
   actor: string,
-  kind?: string
+  kind?: string,
+  sent?: { internetMessageId: string; occurredAt: string }
 ) {
   return request<CaseDetail>("POST", `/cases/${encodeURIComponent(caseId)}/mail-events`, {
     eventType,
     kind,
     subject,
     actor,
+    ...sent,
   });
 }
 

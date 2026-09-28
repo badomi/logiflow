@@ -5,6 +5,7 @@ A트랙은 "받는 사람·제목·본문·첨부"를 만들어 패널에 넘기
 """
 
 import json
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 
@@ -79,23 +80,43 @@ MAIL_EVENT_TYPES = {"DRAFT_SAVED", "MAIL_SENT"}
 STATUS_AFTER_SENT = {"SUPPLEMENT": "보완대기", "QUOTE": "발송완료"}
 
 
-def record_mail_event(session: Session, case: Case, event_type: str, kind: str | None, subject: str, actor: str | None):
-    """작성 창(초안 저장)·보내기 이벤트를 이력에 남긴다. 기록 시각이 곧 발송 시각이다 (FR-505).
+def record_mail_event(
+    session: Session,
+    case: Case,
+    event_type: str,
+    kind: str | None,
+    subject: str,
+    actor: str | None,
+    internet_message_id: str | None = None,
+    occurred_at: datetime | None = None,
+) -> bool:
+    """초안 저장·발송을 이력에 남긴다 (FR-505). 새로 기록했으면 True, 이미 기록된 발송이면 False.
 
+    발송 시각은 보낸 메일의 실제 시각(occurred_at)이 있으면 그 값, 없으면 기록 시각이다.
     이 함수는 기록만 한다. 메일을 보내는 것은 Outlook에서 담당자가 직접 누른 보내기 버튼이다.
     """
     if event_type not in MAIL_EVENT_TYPES:
         raise DraftError(f"알 수 없는 이벤트입니다: {event_type}")
     if kind is None:
         kind = "QUOTE" if "견적서 송부" in subject else "SUPPLEMENT" if "보완 요청" in subject else None
+    if internet_message_id and any(
+        e.event_type == event_type and (json.loads(e.detail or "{}").get("messageId") == internet_message_id)
+        for e in case.events
+    ):
+        return False
 
     detail = {"kind": kind, "subject": subject}
+    if internet_message_id:
+        detail["messageId"] = internet_message_id
+    if occurred_at:
+        detail["sentAt"] = occurred_at.astimezone(timezone.utc).isoformat()
     if event_type == "MAIL_SENT" and kind in STATUS_AFTER_SENT:
         detail["statusFrom"] = case.status
         case.status = STATUS_AFTER_SENT[kind]
         detail["statusTo"] = case.status
     session.add(CaseEvent(case=case, event_type=event_type, actor=actor, detail=json.dumps(detail, ensure_ascii=False)))
     session.commit()
+    return True
 
 
 def quote_files(case: Case) -> list[Path]:

@@ -33,6 +33,12 @@
             <button id="create-case" class="button button--primary" hidden>케이스 생성</button>
         </section>
 
+        <!-- 담당자가 보낸 [케이스ID] 메일: 발송 시각·수행자 기록 (FR-505) -->
+        <section id="sent-section" class="card" hidden>
+            <p id="sent-state"></p>
+            <button id="record-sent" class="button button--primary">발송 기록</button>
+        </section>
+
         <!-- 초안 만들기 (FR-304·505): Outlook 작성 창을 띄우기만 하고, 발송은 담당자가 직접 한다 -->
         <section id="draft-section" class="card" hidden>
             <h2>메일 초안</h2>

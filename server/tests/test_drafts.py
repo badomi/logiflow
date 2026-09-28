@@ -71,6 +71,24 @@ def test_sent_event_records_time_actor_and_status(client):
     assert quote["status"] == "발송완료"
 
 
+def test_sent_mail_recorded_once_with_real_send_time(client):
+    """보낸 편지함의 메일로 기록하면 실제 발송 시각을 남기고, 같은 메일은 한 번만 기록한다."""
+    case_id = make_case(client)
+    body = {
+        "eventType": "MAIL_SENT",
+        "subject": f"[{case_id}] 견적서 송부 / Quotation",
+        "actor": "quote@leona.example.com",
+        "internetMessageId": "<sent-1@leona.example.com>",
+        "occurredAt": "2026-09-28T13:05:00+09:00",
+    }
+    first = client.post(f"/api/cases/{case_id}/mail-events", json=body).json()
+    second = client.post(f"/api/cases/{case_id}/mail-events", json=body).json()
+    sent = [e for e in second["events"] if e["eventType"] == "MAIL_SENT"]
+    assert len(sent) == 1
+    assert sent[0]["detail"]["sentAt"] == "2026-09-28T04:05:00+00:00"
+    assert first["status"] == second["status"] == "발송완료"
+
+
 def test_unknown_mail_event_rejected(client):
     case_id = make_case(client)
     res = client.post(f"/api/cases/{case_id}/mail-events", json={"eventType": "AUTO_SEND"})

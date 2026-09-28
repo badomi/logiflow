@@ -74,6 +74,29 @@
               </Group>
             </OfficeTab>
           </ExtensionPoint>
+          <!-- 메일 작성 창의 리본에 [LEONA 초안 마무리] 버튼: 누르면 제목·첨부를 채우고 초안함에 저장 -->
+          <ExtensionPoint xsi:type="MessageComposeCommandSurface">
+            <OfficeTab id="TabDefault">
+              <Group id="msgComposeGroup">
+                <Label resid="GroupLabel"/>
+                <Control xsi:type="Button" id="msgComposeFinalizeButton">
+                  <Label resid="FinalizeButton.Label"/>
+                  <Supertip>
+                    <Title resid="FinalizeButton.Label"/>
+                    <Description resid="FinalizeButton.Tooltip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16x16"/>
+                    <bt:Image size="32" resid="Icon.32x32"/>
+                    <bt:Image size="80" resid="Icon.80x80"/>
+                  </Icon>
+                  <Action xsi:type="ExecuteFunction">
+                    <FunctionName>finalizeDraft</FunctionName>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
         </DesktopFormFactor>
       </Host>
     </Hosts>
@@ -90,9 +113,11 @@
       <bt:ShortStrings>
         <bt:String id="GroupLabel" DefaultValue="LEONA 자동견적"/>
         <bt:String id="TaskpaneButton.Label" DefaultValue="LEONA 패널"/>
+        <bt:String id="FinalizeButton.Label" DefaultValue="LEONA 초안 마무리"/>
       </bt:ShortStrings>
       <bt:LongStrings>
         <bt:String id="TaskpaneButton.Tooltip" DefaultValue="선택한 메일 정보를 보여주는 패널을 엽니다."/>
+        <bt:String id="FinalizeButton.Tooltip" DefaultValue="패널에서 연 초안의 제목(케이스 ID)·첨부를 채우고 초안함에 저장합니다. 보내기는 직접 누릅니다."/>
       </bt:LongStrings>
     </Resources>
     <!-- 1.1 규격을 아는 Outlook은 아래 설정을 쓰고, 모르는 Outlook은 위(1.0) 설정을 쓴다 -->
@@ -139,6 +164,29 @@
                 </Group>
               </OfficeTab>
             </ExtensionPoint>
+            <!-- 메일 작성 창의 리본에 [LEONA 초안 마무리] 버튼: 누르면 제목·첨부를 채우고 초안함에 저장 -->
+            <ExtensionPoint xsi:type="MessageComposeCommandSurface">
+              <OfficeTab id="TabDefault">
+                <Group id="msgComposeGroup">
+                  <Label resid="GroupLabel"/>
+                  <Control xsi:type="Button" id="msgComposeFinalizeButton">
+                    <Label resid="FinalizeButton.Label"/>
+                    <Supertip>
+                      <Title resid="FinalizeButton.Label"/>
+                      <Description resid="FinalizeButton.Tooltip"/>
+                    </Supertip>
+                    <Icon>
+                      <bt:Image size="16" resid="Icon.16x16"/>
+                      <bt:Image size="32" resid="Icon.32x32"/>
+                      <bt:Image size="80" resid="Icon.80x80"/>
+                    </Icon>
+                    <Action xsi:type="ExecuteFunction">
+                      <FunctionName>finalizeDraft</FunctionName>
+                    </Action>
+                  </Control>
+                </Group>
+              </OfficeTab>
+            </ExtensionPoint>
             <!-- 이벤트 기반 실행: 사용자가 작성 창을 열거나 보내기를 누를 때만 실행된다 (폴링 아님) -->
             <ExtensionPoint xsi:type="LaunchEvent">
               <LaunchEvents>
@@ -167,9 +215,11 @@
         <bt:ShortStrings>
           <bt:String id="GroupLabel" DefaultValue="LEONA 자동견적"/>
           <bt:String id="TaskpaneButton.Label" DefaultValue="LEONA 패널"/>
+          <bt:String id="FinalizeButton.Label" DefaultValue="LEONA 초안 마무리"/>
         </bt:ShortStrings>
         <bt:LongStrings>
           <bt:String id="TaskpaneButton.Tooltip" DefaultValue="선택한 메일 정보를 보여주는 패널을 엽니다."/>
+          <bt:String id="FinalizeButton.Tooltip" DefaultValue="패널에서 연 초안의 제목(케이스 ID)·첨부를 채우고 초안함에 저장합니다. 보내기는 직접 누릅니다."/>
         </bt:LongStrings>
       </Resources>
     </VersionOverrides>

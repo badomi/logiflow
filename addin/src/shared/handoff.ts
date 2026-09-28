@@ -16,8 +16,8 @@ export interface PendingDraft {
 }
 
 const KEY = "leona.pendingDraft";
-/** 이보다 오래된 쪽지는 무시한다 (담당자가 직접 연 다른 메일 작성 창에 잘못 붙지 않게) */
-const MAX_AGE_MS = 2 * 60 * 1000;
+/** 이보다 오래된 쪽지는 무시한다 (담당자가 나중에 연 다른 메일 작성 창에 잘못 붙지 않게) */
+const MAX_AGE_MS = 30 * 60 * 1000;
 
 export function savePendingDraft(draft: Omit<PendingDraft, "createdAt">): void {
   try {

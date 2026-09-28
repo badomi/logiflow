@@ -116,7 +116,16 @@ def mail_event(case_id: str, body: MailEventRequest, session: Session = Depends(
     """[초안 저장·발송 기록] Outlook 작성 창과 보내기 이벤트가 호출한다. 기록만 하고 발송하지 않는다 (FR-505)."""
     try:
         case = services.get_case(session, case_id)
-        drafts.record_mail_event(session, case, body.event_type, body.kind, body.subject, body.actor)
+        drafts.record_mail_event(
+            session,
+            case,
+            body.event_type,
+            body.kind,
+            body.subject,
+            body.actor,
+            internet_message_id=body.internet_message_id,
+            occurred_at=body.occurred_at,
+        )
     except (services.NotFoundError, drafts.DraftError) as error:
         raise _http_error(error) from error
     return services.case_detail(case)
