@@ -97,6 +97,7 @@ class DraftOut(CamelModel):
     """메일 초안 내용. 패널이 이 값으로 Outlook 작성 창을 띄우고, 발송은 담당자가 한다."""
 
     kind: str  # SUPPLEMENT(보완 요청) / QUOTE(견적서 송부)
+    case_id: str
     to: list[Address]
     subject: str
     html_body: str

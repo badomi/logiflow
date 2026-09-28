@@ -27,6 +27,25 @@ def test_supplement_draft(client):
     assert events[-1]["eventType"] == "DRAFT_PREPARED" and events[-1]["detail"]["questionCount"] == 2
 
 
+def test_pending_draft_until_saved(client):
+    """작성 창 버튼 보조 경로: 방금 준비한 초안을 돌려주고, 초안함 저장이 기록되면 더 이상 돌려주지 않는다."""
+    case_id = make_case(client)
+    actor = "quote@leona.example.com"
+    assert client.get("/api/drafts/pending", params={"actor": actor}).json() is None
+
+    client.post(f"/api/cases/{case_id}/drafts/supplement", json={"questions": ["POL?"], "actor": actor})
+    pending = client.get("/api/drafts/pending", params={"actor": actor}).json()
+    assert pending["caseId"] == case_id and pending["kind"] == "SUPPLEMENT"
+    assert pending["subject"].startswith(f"[{case_id}]")
+    assert client.get("/api/drafts/pending", params={"actor": "other@example.com"}).json() is None
+
+    client.post(
+        f"/api/cases/{case_id}/mail-events",
+        json={"eventType": "DRAFT_SAVED", "subject": pending["subject"], "actor": actor},
+    )
+    assert client.get("/api/drafts/pending", params={"actor": actor}).json() is None
+
+
 def test_supplement_draft_escapes_html(client):
     case_id = make_case(client)
     draft = client.post(f"/api/cases/{case_id}/drafts/supplement", json={"questions": ["<script>x</script>"]}).json()

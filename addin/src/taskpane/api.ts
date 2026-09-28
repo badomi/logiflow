@@ -87,6 +87,7 @@ export function mergeReply(caseId: string, input: MailInput) {
 
 export interface Draft {
   kind: "SUPPLEMENT" | "QUOTE";
+  caseId: string;
   to: { name: string; email: string }[];
   subject: string;
   htmlBody: string;
@@ -101,6 +102,11 @@ export function supplementDraft(caseId: string, questions: string[], actor: stri
 /** [견적서 송부 초안] FR-505 */
 export function quoteDraft(caseId: string, actor: string) {
   return request<Draft>("POST", `/cases/${encodeURIComponent(caseId)}/drafts/quote`, { actor });
+}
+
+/** 이 담당자가 방금 패널에서 준비한 초안 (작성 창 버튼의 보조 경로). 없으면 null */
+export function pendingDraft(actor: string) {
+  return request<Draft | null>("GET", `/drafts/pending?actor=${encodeURIComponent(actor)}`);
 }
 
 /** [초안 저장·발송 기록] FR-505 — 기록만 한다. 발송은 담당자가 Outlook에서 직접 누른다 */

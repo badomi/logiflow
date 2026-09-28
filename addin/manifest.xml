@@ -74,7 +74,7 @@
               </Group>
             </OfficeTab>
           </ExtensionPoint>
-          <!-- 메일 작성 창의 리본에 [LEONA 초안 마무리] 버튼: 누르면 제목·첨부를 채우고 초안함에 저장 -->
+          <!-- 메일 작성 창의 리본에 [LEONA 초안 마무리] 버튼: 작성 모드 패널을 열어 제목·첨부를 채우고 초안함에 저장 -->
           <ExtensionPoint xsi:type="MessageComposeCommandSurface">
             <OfficeTab id="TabDefault">
               <Group id="msgComposeGroup">
@@ -90,8 +90,8 @@
                     <bt:Image size="32" resid="Icon.32x32"/>
                     <bt:Image size="80" resid="Icon.80x80"/>
                   </Icon>
-                  <Action xsi:type="ExecuteFunction">
-                    <FunctionName>finalizeDraft</FunctionName>
+                  <Action xsi:type="ShowTaskpane">
+                    <SourceLocation resid="Taskpane.Url"/>
                   </Action>
                 </Control>
               </Group>
@@ -164,7 +164,7 @@
                 </Group>
               </OfficeTab>
             </ExtensionPoint>
-            <!-- 메일 작성 창의 리본에 [LEONA 초안 마무리] 버튼: 누르면 제목·첨부를 채우고 초안함에 저장 -->
+            <!-- 메일 작성 창의 리본에 [LEONA 초안 마무리] 버튼: 작성 모드 패널을 열어 제목·첨부를 채우고 초안함에 저장 -->
             <ExtensionPoint xsi:type="MessageComposeCommandSurface">
               <OfficeTab id="TabDefault">
                 <Group id="msgComposeGroup">
@@ -180,8 +180,8 @@
                       <bt:Image size="32" resid="Icon.32x32"/>
                       <bt:Image size="80" resid="Icon.80x80"/>
                     </Icon>
-                    <Action xsi:type="ExecuteFunction">
-                      <FunctionName>finalizeDraft</FunctionName>
+                    <Action xsi:type="ShowTaskpane">
+                      <SourceLocation resid="Taskpane.Url"/>
                     </Action>
                   </Control>
                 </Group>

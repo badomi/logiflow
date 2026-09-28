@@ -5,10 +5,11 @@ A트랙은 "받는 사람·제목·본문·첨부"를 만들어 패널에 넘기
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import storage
@@ -71,7 +72,7 @@ def supplement_draft(session: Session, case: Case, questions: list[str], actor: 
         f"Thank you.<br>{SIGNATURE_EN}</p>"
     )
     _record(session, case, "SUPPLEMENT", actor, {"subject": subject, "questionCount": len(questions)})
-    return DraftOut(kind="SUPPLEMENT", to=_recipient(case), subject=subject, html_body=body, attachments=[])
+    return DraftOut(kind="SUPPLEMENT", case_id=case.case_id, to=_recipient(case), subject=subject, html_body=body, attachments=[])
 
 
 MAIL_EVENT_TYPES = {"DRAFT_SAVED", "MAIL_SENT"}
@@ -119,6 +120,46 @@ def record_mail_event(
     return True
 
 
+PENDING_WINDOW = timedelta(minutes=30)
+
+
+def latest_pending_draft(session: Session, actor: str) -> DraftOut | None:
+    """이 담당자가 최근 30분 안에 준비했지만 아직 초안함 저장이 기록되지 않은 초안.
+
+    작성 창의 [LEONA 초안 마무리] 버튼이 패널의 쪽지를 못 읽을 때 쓰는 보조 경로다.
+    """
+    since = datetime.now(timezone.utc) - PENDING_WINDOW
+    events = session.scalars(
+        select(CaseEvent)
+        .where(CaseEvent.actor == actor, CaseEvent.event_type.in_(["DRAFT_PREPARED", "DRAFT_SAVED"]))
+        .order_by(CaseEvent.id.desc())
+        .limit(1)
+    ).all()
+    if not events or events[0].event_type != "DRAFT_PREPARED":
+        return None
+    event = events[0]
+    created = event.created_at if event.created_at.tzinfo else event.created_at.replace(tzinfo=timezone.utc)
+    if created < since:
+        return None
+
+    detail = json.loads(event.detail or "{}")
+    case = event.case
+    attachments = []
+    if detail.get("kind") == "QUOTE":
+        attachments = [
+            DraftAttachment(filename=f.name, url=f"/api/cases/{case.case_id}/quotes/{f.name}", size=f.stat().st_size)
+            for f in quote_files(case)
+        ]
+    return DraftOut(
+        kind=detail.get("kind", "SUPPLEMENT"),
+        case_id=case.case_id,
+        to=_recipient(case),
+        subject=detail.get("subject", ""),
+        html_body="",
+        attachments=attachments,
+    )
+
+
 def quote_files(case: Case) -> list[Path]:
     """C트랙이 만든 견적서(PDF·XLSX)는 storage/<케이스ID>/quotes/ 에 둔다."""
     folder = settings.storage_dir / case.case_id / "quotes"
@@ -155,4 +196,4 @@ def quote_draft(session: Session, case: Case, actor: str | None) -> DraftOut:
         for f in files
     ]
     _record(session, case, "QUOTE", actor, {"subject": subject, "files": [f.name for f in files]})
-    return DraftOut(kind="QUOTE", to=_recipient(case), subject=subject, html_body=body, attachments=attachments)
+    return DraftOut(kind="QUOTE", case_id=case.case_id, to=_recipient(case), subject=subject, html_body=body, attachments=attachments)

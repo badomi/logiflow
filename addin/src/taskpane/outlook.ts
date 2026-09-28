@@ -1,5 +1,6 @@
 /* global document, Office */
 
+import { finalizeDraft, findPendingDraft } from "../shared/finalize";
 import { savePendingDraft } from "../shared/handoff";
 import {
   ApiError,
@@ -41,6 +42,16 @@ Office.onReady((info) => {
 
   document.getElementById("sideload-msg")!.style.display = "none";
   document.getElementById("app-body")!.style.display = "block";
+
+  // 작성 창에서 연 패널이면 초안 마무리만 한다
+  if (isComposeMode()) {
+    document.getElementById("read-body")!.hidden = true;
+    document.getElementById("compose-section")!.hidden = false;
+    document.getElementById("compose-retry")!.onclick = runComposeFinalize;
+    runComposeFinalize();
+    return;
+  }
+
   document.getElementById("create-case")!.onclick = onCreateCase;
   document.getElementById("merge-selected")!.onclick = () => {
     const select = document.getElementById("case-select") as HTMLSelectElement;
@@ -56,6 +67,34 @@ Office.onReady((info) => {
   }
   loadCurrentItem();
 });
+
+/** 작성 중인 메일이면 제목을 쓸 수 있는(setAsync) 객체가 있다 */
+function isComposeMode(): boolean {
+  const item = Office.context.mailbox.item as Office.MessageCompose | undefined;
+  return typeof item?.subject?.setAsync === "function";
+}
+
+/** [작성 창] 패널이 준비한 초안이면 제목 케이스 ID·첨부를 채우고 초안함에 저장한다 (FR-304·505). */
+async function runComposeFinalize() {
+  const item = Office.context.mailbox.item as Office.MessageCompose;
+  const retry = document.getElementById("compose-retry")!;
+  retry.hidden = true;
+  setStatus("", "info");
+  try {
+    const pending = await findPendingDraft(item);
+    if (!pending) {
+      setText("compose-state", "LEONA 패널에서 연 초안이 아닙니다. 받은 메일의 LEONA 패널에서 [초안 열기]를 먼저 눌러 주세요.");
+      return;
+    }
+    await finalizeDraft(item, pending, (step) => setText("compose-state", step));
+    setText("compose-state", `${pending.caseId} 초안을 초안함에 저장했습니다.`);
+    setStatus("내용을 확인한 뒤 직접 [보내기]를 눌러 주세요. 자동으로 보내지 않습니다.", "success");
+  } catch (error) {
+    setText("compose-state", "초안을 마무리하지 못했습니다.");
+    setStatus(messageOf(error), "error");
+    retry.hidden = false;
+  }
+}
 
 async function loadCurrentItem() {
   const token = ++loadToken;

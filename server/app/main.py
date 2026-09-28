@@ -111,6 +111,12 @@ def quote_draft(case_id: str, body: ActorRequest, session: Session = Depends(get
         raise _http_error(error) from error
 
 
+@app.get("/api/drafts/pending", response_model=DraftOut | None)
+def pending_draft(actor: str, session: Session = Depends(get_session)):
+    """이 담당자가 방금 패널에서 준비한(아직 저장 기록이 없는) 초안. 작성 창 버튼의 보조 경로."""
+    return drafts.latest_pending_draft(session, actor)
+
+
 @app.post("/api/cases/{case_id}/mail-events", response_model=CaseDetail)
 def mail_event(case_id: str, body: MailEventRequest, session: Session = Depends(get_session)):
     """[초안 저장·발송 기록] Outlook 작성 창과 보내기 이벤트가 호출한다. 기록만 하고 발송하지 않는다 (FR-505)."""
