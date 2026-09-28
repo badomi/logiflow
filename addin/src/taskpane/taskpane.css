@@ -8,21 +8,25 @@ body {
   background: #ffffff;
 }
 
+/* 머리 부분: 로고가 남색이라 흰 배경, 아래에 로고 색(남색·청록) 선 */
 .header {
-  padding: 16px;
-  background: #1f3a5f;
-  color: #ffffff;
+  padding: 12px 16px 10px;
+  background: #ffffff;
+  border-bottom: 3px solid #1f3a6e;
+  box-shadow: 0 3px 0 #1f8fa6;
 }
 
-.header h1 {
-  margin: 0;
-  font-size: 18px;
+.header__logo {
+  display: block;
+  width: 160px;
+  max-width: 70%;
+  height: auto;
 }
 
 .header p {
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   font-size: 12px;
-  opacity: 0.85;
+  color: #1f3a6e;
 }
 
 .main {
