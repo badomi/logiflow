@@ -1,0 +1,12 @@
+# A트랙 백엔드 의존성 (라이선스: MIT·BSD·Apache 2.0 계열만)
+fastapi==0.141.1            # MIT     웹 API 프레임워크
+uvicorn[standard]==0.54.0   # BSD-3   API 서버 실행기
+sqlalchemy==2.1.1           # MIT     DB 연결 (SQLite ↔ Oracle 교체 가능)
+pydantic-settings==2.15.0   # MIT     .env 설정 읽기
+python-multipart==0.0.32    # Apache  파일 업로드(.eml) 처리
+
+# Oracle 연결 시에만 설치: pip install oracledb   (Apache 2.0 / UPL)
+
+# 테스트
+pytest==9.1.1               # MIT
+httpx==0.28.1               # BSD-3

@@ -31,3 +31,13 @@ npm-debug.log*
 Thumbs.db
 desktop.ini
 ~$*
+
+# Python 백엔드 (server/)
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+server/data/
+server/storage/
+server/out/
+*.db
