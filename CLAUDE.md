@@ -74,7 +74,15 @@ A트랙은 MUST-SHIP 4개 모두의 **입구(메일 꺼내기·케이스 생성)
 - FR-304·305·510 보완 요청 초안: 원래 메일에 대한 회신 창 → 작성 창에서 LEONA 패널이 제목 `[케이스ID]`·저장(saveAsync)
 - FR-505 발송 기록: 보낸 편지함 메일 → 패널 [발송 기록] (원문 Date 헤더로 실제 발송 시각), 상태 보완대기/발송완료
 - FR-104·207 회신 병합: 제목 케이스 ID(1.0)·In-Reply-To/References(0.9)·conversationId(0.7)로 후보 → 담당자 확인 후 병합 → pipeline 재실행
-- 남은 확인: 견적서 첨부 송부 초안(FR-505) 실제 Outlook 테스트, 발주 측 견적서 양식 파일 수령
+- FR-505 견적서 송부 초안: 견적서 PDF 자동 첨부(Base64) + 초안함 저장 (테스트용 임시 PDF로 확인)
+- 서버 실행: 프로젝트 루트 `start-dev.bat` 더블클릭 (창 2개, 닫으면 종료)
+
+다음 할 일:
+1. 추가 클릭 줄이기 시험 — ① 보완 요청 인라인 회신 때 고정 패널이 작성 중 메일 제목을 바꿀 수 있는지 ② 보낸 메일·대화를 열면 [발송 기록] 없이 자동 기록
+2. 발주 측 질문: 담당자 Outlook(데스크톱/웹), 사내 IT 중앙 배포 가능 여부, 회사 DB 종류, 로고 사용 허락, 노션 양식 3종 전달, 7장 Graph 문구 Rev 1.3 반영
+3. 앱 목록 아이콘: 정사각형 `addin/assets/icon-128.png`를 공개 주소에 올려 IconUrl 교체 (현재 홈페이지 로고는 가로로 눌림)
+4. 팀 공유: GitHub 비공개 저장소 (발주 측 자료 포함 — 공개 금지)
+5. B트랙 초석: 6장 스키마·근거/신뢰도 구조, 전처리(인용문 분리·첨부 텍스트), 룰 기반 기본 추출기, LLM 연결 규격 (모델 선택은 B트랙)
 
 ## 추가 결정 사항 (2026-09-28, 실제 테스트 근거)
 - **백엔드: Python + FastAPI.** B·C트랙(로컬 LLM, PDF·XLSX)과 언어 통일. DB는 SQLAlchemy로 추상화 — 개발 SQLite, 통합 테스트 학교 Oracle, 인수 시 발주 측 DB(`DATABASE_URL`만 교체). 발주 측 DB 종류 확인 필요.
@@ -83,7 +91,9 @@ A트랙은 MUST-SHIP 4개 모두의 **입구(메일 꺼내기·케이스 생성)
 - **사이드로드 환경에서 백그라운드 실행(commands.html)이 동작하지 않음.** 이벤트 기반 실행(OnNewMessageCompose·OnMessageSend)·ExecuteFunction 모두 미실행 확인. 보내기 이벤트는 모든 발송을 붙잡아 매니페스트에서 제거. 코드는 사내 관리자 배포 검증용으로 `addin/src/commands`에 보존.
 - **B·C트랙 연결 지점:** `server/app/pipeline.py`의 `Extractor`/`Validator` 규격 + `register()`. 케이스 생성·회신 병합 때 자동 호출, 실패해도 케이스 유지(NFR-03). 보완 문항은 현재 패널 임시 입력 → C트랙 검증 결과로 교체 예정. 견적서는 `storage/<케이스ID>/quotes/` 또는 `POST /api/cases/{id}/quotes`.
 - 메일 표준 JSON(`MailSnapshot` v1: subject, from, to, cc, receivedAt, bodyText, conversationId, internetMessageId, inReplyTo, references, attachments) — B트랙 확인 요청 중.
-- 로고: 발주 측 로고를 변형 없이 사용(`addin/assets/leona-logo.png`, 캡처본 — 원본 수령 시 교체). 사용 허락 확인 권장.
+- 로고: 발주 측 로고를 변형 없이 사용(패널 머리 `addin/assets/leona-logo.png`, 캡처본 — 원본 수령 시 교체). 사용 허락 확인 권장.
+- 앱 목록 아이콘은 Microsoft 서버가 설치 시 가져가므로 공개 HTTPS 주소 필수(localhost 불가). Outlook은 아이콘을 정사각형으로 늘리므로 정사각형 이미지를 써야 한다.
+- 테스트 계정: 발주 측 제공 없음, 각자 개인 Microsoft 계정(학교 M365 계정으로 검증). 화주 역할 계정을 따로 두면 테스트가 정확해진다.
 
 ## 공통 규칙
 - 요구사항 정의서에 없는 기능은 만들지 않는다.
