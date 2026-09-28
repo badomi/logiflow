@@ -60,10 +60,30 @@ A트랙은 MUST-SHIP 4개 모두의 **입구(메일 꺼내기·케이스 생성)
 - 개발 서버: `npm start` → 개발용 HTTPS 인증서 + `https://localhost:3000`.
 - 사이드로드: Outlook 웹(outlook.live.com) → 메일 열기 → 앱/추가 기능 가져오기 → 내 추가 기능 → 사용자 지정 추가 → 파일에서 manifest.xml.
 - 메일 읽기: `Office.context.mailbox.item` — `subject`, `from`, `body.getAsync`, `getAllInternetHeadersAsync`(In-Reply-To/References), `conversationId`, 첨부는 `getAttachmentContentAsync`(요구사항 세트 1.8+).
-- **최대 리스크 — 초안함 생성(FR-304/505):** `displayReplyForm`은 회신 창만 띄우고 초안함에 저장하지 않는다. 초안함 저장은 Microsoft Graph(`createReply` 등, 위임 권한 `Mail.ReadWrite`)가 필요할 가능성이 높고, 애드인 내 인증(NAA/MSAL)과 앱 등록이 따라온다. 개인 계정에서의 앱 등록 방식도 확인 필요. 5·6번 끝나면 PoC로 먼저 검증.
+- ~~최대 리스크 — 초안함 생성(FR-304/505)~~ → 2026-09-28 해결: Graph 없이 Office.js(작성 창 패널의 saveAsync)로 초안함 저장 확인. 아래 "추가 결정 사항" 참고.
 - 인증키·토큰은 소스에 하드코딩 금지(NFR-04). 외부 라이브러리는 MIT·Apache 2.0 계열만(GPL 금지).
 - 커밋 메시지에 요구사항 ID 포함. 예: `FR-102 케이스 ID 발급 로직 추가`.
 - 스레드 처리 주의: 샘플에 문의→회신→재문의→업데이트 식 긴 스레드가 있음. 최신 회신 판별과 인용문 분리를 고려해 원문을 깔끔하게 넘길 것.
+
+## 진행 상황 (2026-09-28 기준) — A트랙
+구조: `addin/`(Outlook 애드인, TypeScript) → `/api` 프록시 → `server/`(Python FastAPI + SQLAlchemy, 개발 DB는 SQLite).
+실행·설치 절차는 `docs/설치절차_A트랙_애드인.md`. 백엔드 테스트 34건(`server/tests`).
+
+실제 Outlook 웹(학교 계정)에서 끝까지 확인한 것:
+- FR-101·102·103·105 케이스 생성: 원문 .eml(getAsFileAsync)을 백엔드가 파싱, `LQ-YYYY-MMDD-NNN`(KST 날짜별 순번), internetMessageId 중복 방지
+- FR-304·305·510 보완 요청 초안: 원래 메일에 대한 회신 창 → 작성 창에서 LEONA 패널이 제목 `[케이스ID]`·저장(saveAsync)
+- FR-505 발송 기록: 보낸 편지함 메일 → 패널 [발송 기록] (원문 Date 헤더로 실제 발송 시각), 상태 보완대기/발송완료
+- FR-104·207 회신 병합: 제목 케이스 ID(1.0)·In-Reply-To/References(0.9)·conversationId(0.7)로 후보 → 담당자 확인 후 병합 → pipeline 재실행
+- 남은 확인: 견적서 첨부 송부 초안(FR-505) 실제 Outlook 테스트, 발주 측 견적서 양식 파일 수령
+
+## 추가 결정 사항 (2026-09-28, 실제 테스트 근거)
+- **백엔드: Python + FastAPI.** B·C트랙(로컬 LLM, PDF·XLSX)과 언어 통일. DB는 SQLAlchemy로 추상화 — 개발 SQLite, 통합 테스트 학교 Oracle, 인수 시 발주 측 DB(`DATABASE_URL`만 교체). 발주 측 DB 종류 확인 필요.
+- **초안 생성은 Graph 대신 Office.js.** Graph `Mail.ReadWrite`는 사서함 전체 권한이라 승인된 변경 요청서("선택 메일 권한만")와 어긋남. 매니페스트 권한은 `ReadWriteItem`(열린 메일 1통). 정의서 7장 "Graph로 회신·발송" 문구와 다르므로 Rev 1.3 반영 요청 필요.
+- **작성 창만 띄우면 초안함에 저장되지 않는다**(Outlook 웹 자동 저장 안 됨) → 작성 창에서 패널이 saveAsync.
+- **사이드로드 환경에서 백그라운드 실행(commands.html)이 동작하지 않음.** 이벤트 기반 실행(OnNewMessageCompose·OnMessageSend)·ExecuteFunction 모두 미실행 확인. 보내기 이벤트는 모든 발송을 붙잡아 매니페스트에서 제거. 코드는 사내 관리자 배포 검증용으로 `addin/src/commands`에 보존.
+- **B·C트랙 연결 지점:** `server/app/pipeline.py`의 `Extractor`/`Validator` 규격 + `register()`. 케이스 생성·회신 병합 때 자동 호출, 실패해도 케이스 유지(NFR-03). 보완 문항은 현재 패널 임시 입력 → C트랙 검증 결과로 교체 예정. 견적서는 `storage/<케이스ID>/quotes/` 또는 `POST /api/cases/{id}/quotes`.
+- 메일 표준 JSON(`MailSnapshot` v1: subject, from, to, cc, receivedAt, bodyText, conversationId, internetMessageId, inReplyTo, references, attachments) — B트랙 확인 요청 중.
+- 로고: 발주 측 로고를 변형 없이 사용(`addin/assets/leona-logo.png`, 캡처본 — 원본 수령 시 교체). 사용 허락 확인 권장.
 
 ## 공통 규칙
 - 요구사항 정의서에 없는 기능은 만들지 않는다.
