@@ -11,8 +11,9 @@
   <DefaultLocale>ko-KR</DefaultLocale>
   <DisplayName DefaultValue="LEONA 자동견적"/>
   <Description DefaultValue="선택한 견적 요청 메일의 정보를 읽어 패널에 표시합니다."/>
-  <IconUrl DefaultValue="https://localhost:3000/assets/icon-64.png"/>
-  <HighResolutionIconUrl DefaultValue="https://localhost:3000/assets/icon-128.png"/>
+  <!-- 앱 목록 아이콘은 Microsoft 서버가 가져가므로 공개 주소여야 한다 (localhost 불가). 발주 측 홈페이지 공식 로고 사용 -->
+  <IconUrl DefaultValue="https://www.leonakorea.com/wp-content/uploads/2020/12/1608271381291.png"/>
+  <HighResolutionIconUrl DefaultValue="https://www.leonakorea.com/wp-content/uploads/2020/12/1608271381291.png"/>
   <SupportUrl DefaultValue="https://localhost:3000/taskpane.html"/>
   <Hosts>
     <Host Name="Mailbox"/>
