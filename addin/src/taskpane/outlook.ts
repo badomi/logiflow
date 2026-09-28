@@ -4,7 +4,9 @@ import { finalizeDraft, findPendingDraft } from "../shared/finalize";
 import { savePendingDraft } from "../shared/handoff";
 import {
   ApiError,
+  apiUrl,
   createCase,
+  getCase,
   listCases,
   matchReply,
   mergeReply,
@@ -180,9 +182,9 @@ function renderSentState(mail: MailSnapshot) {
   if (!section.hidden) {
     setText("sent-state", `담당자가 보낸 ${caseId} 케이스 메일입니다. 발송 이력에 남기려면 누르세요.`);
     sentCaseId = caseId!;
-    // 보낸 메일은 새 케이스·회신 병합 대상이 아니다 (단, 본인에게 보내는 테스트에서는 아래 '직접 선택'으로 병합 가능)
+    // 보낸 메일은 새 케이스 대상이 아니다. 이미 케이스에 등록된 메일이면 그 안내는 그대로 둔다
     showCreateButton(false);
-    setText("case-state", "");
+    if (!currentCaseId) setText("case-state", "");
   }
 }
 
@@ -281,6 +283,7 @@ function resetCaseArea() {
   currentCaseId = null;
   sentCaseId = null;
   document.getElementById("sent-section")!.hidden = true;
+  document.getElementById("files-section")!.hidden = true;
   setText("case-state", "");
   showCreateButton(false);
   document.getElementById("draft-section")!.hidden = true;
@@ -296,6 +299,7 @@ function renderCaseState(registeredCaseId: string | null, candidates: ReplyCandi
     currentCaseId = registeredCaseId;
     setText("case-state", `이 메일은 케이스 ${registeredCaseId}에 등록되어 있습니다.`);
     document.getElementById("draft-section")!.hidden = false;
+    renderCaseFiles(registeredCaseId);
     return;
   }
 
@@ -307,6 +311,41 @@ function renderCaseState(registeredCaseId: string | null, candidates: ReplyCandi
       : "아직 케이스로 등록되지 않은 메일입니다."
   );
   renderReplySection(candidates);
+}
+
+/** 케이스에 저장된 메일 원문·첨부를 다시 열 수 있게 링크로 보여준다 (FR-103). */
+async function renderCaseFiles(caseId: string) {
+  const token = loadToken;
+  const section = document.getElementById("files-section")!;
+  const list = document.getElementById("case-files")!;
+  try {
+    const detail = await getCase(caseId);
+    if (token !== loadToken || currentCaseId !== caseId) return;
+    list.replaceChildren();
+    for (const mail of detail.mails) {
+      const item = document.createElement("li");
+      const meta = document.createElement("div");
+      meta.className = "file-meta";
+      const when = mail.snapshot.receivedAt ? new Date(mail.snapshot.receivedAt).toLocaleString("ko-KR") : "";
+      meta.textContent = `${mail.index}. ${mail.role === "ORIGINAL" ? "요청 메일" : "회신"} · ${when}`;
+      item.appendChild(meta);
+      if (mail.rawUrl) item.appendChild(fileLink("원문(.eml)", mail.rawUrl));
+      for (const file of mail.attachmentFiles) item.appendChild(fileLink(file.filename, file.url));
+      list.appendChild(item);
+    }
+    section.hidden = detail.mails.length === 0;
+  } catch {
+    section.hidden = true; // 자료 목록을 못 불러와도 다른 기능은 그대로 쓴다
+  }
+}
+
+function fileLink(label: string, url: string): HTMLAnchorElement {
+  const link = document.createElement("a");
+  link.textContent = label;
+  link.href = apiUrl(url);
+  link.target = "_blank";
+  link.rel = "noopener";
+  return link;
 }
 
 function renderReplySection(candidates: ReplyCandidate[]) {

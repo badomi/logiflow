@@ -20,8 +20,22 @@ export interface CaseSummary {
   createdAt: string;
 }
 
+export interface FileLink {
+  filename: string;
+  size: number;
+  url: string;
+}
+
 export interface CaseDetail extends CaseSummary {
-  mails: { role: string; source: string; hasRaw: boolean }[];
+  mails: {
+    index: number;
+    role: string;
+    source: string;
+    hasRaw: boolean;
+    rawUrl: string | null;
+    attachmentFiles: FileLink[];
+    snapshot: { subject: string; receivedAt: string | null; from: { name: string; email: string } };
+  }[];
   events: { eventType: string; actor: string | null; detail: Record<string, string> | null; createdAt: string }[];
 }
 
@@ -138,6 +152,11 @@ export async function fetchFileBase64(url: string): Promise<string> {
     binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   }
   return btoa(binary);
+}
+
+/** 케이스 상세 (메일·첨부 다시 열기, 추출 상태) */
+export function getCase(caseId: string) {
+  return request<CaseDetail>("GET", `/cases/${encodeURIComponent(caseId)}`);
 }
 
 /** 최근 케이스 목록 — 자동 식별 실패 시 직접 선택용 */

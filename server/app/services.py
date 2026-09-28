@@ -18,6 +18,7 @@ from .schemas import (
     CaseDetail,
     CaseSummary,
     EventOut,
+    FileLink,
     MailInput,
     MailOut,
     MailSnapshot,
@@ -239,6 +240,24 @@ def get_case(session: Session, case_id: str) -> Case:
     return case
 
 
+def raw_mail_path(session: Session, case_id: str, index: int):
+    """케이스의 index번째 메일 원문 파일 경로 (FR-103 다시 열어보기)."""
+    case = get_case(session, case_id)
+    if not 1 <= index <= len(case.mails) or not case.mails[index - 1].raw_path:
+        raise NotFoundError("원문 파일이 없습니다.")
+    return storage.full_path(case.mails[index - 1].raw_path)
+
+
+def attachment_path(session: Session, case_id: str, attachment_id: int):
+    """케이스에 속한 첨부파일 경로와 이름. 다른 케이스의 첨부는 열 수 없다."""
+    case = get_case(session, case_id)
+    for mail in case.mails:
+        for attachment in mail.attachments:
+            if attachment.id == attachment_id:
+                return storage.full_path(attachment.storage_path), attachment.filename
+    raise NotFoundError("첨부파일이 없습니다.")
+
+
 def list_cases(session: Session, limit: int) -> list[CaseSummary]:
     cases = session.scalars(select(Case).order_by(Case.id.desc()).limit(limit))
     return [_summary(c) for c in cases]
@@ -248,8 +267,19 @@ def case_detail(case: Case) -> CaseDetail:
     return CaseDetail(
         **_summary(case).model_dump(),
         mails=[
-            MailOut(role=m.role, source=m.source, snapshot=mail_to_snapshot(m), has_raw=m.raw_path is not None)
-            for m in case.mails
+            MailOut(
+                index=i,
+                role=m.role,
+                source=m.source,
+                snapshot=mail_to_snapshot(m),
+                has_raw=m.raw_path is not None,
+                raw_url=f"/api/cases/{case.case_id}/mails/{i}/raw" if m.raw_path else None,
+                attachment_files=[
+                    FileLink(filename=a.filename, size=a.size_bytes, url=f"/api/cases/{case.case_id}/attachments/{a.id}")
+                    for a in m.attachments
+                ],
+            )
+            for i, m in enumerate(case.mails, start=1)
         ],
         events=[
             EventOut(

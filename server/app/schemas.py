@@ -55,11 +55,22 @@ class EventOut(CamelModel):
     created_at: datetime
 
 
+class FileLink(CamelModel):
+    """케이스 화면에서 다시 열어볼 수 있는 파일 (FR-103)"""
+
+    filename: str
+    size: int
+    url: str
+
+
 class MailOut(CamelModel):
+    index: int  # 케이스 안에서 몇 번째 메일인지 (1부터)
     role: str
     source: str
     snapshot: MailSnapshot
     has_raw: bool
+    raw_url: str | None  # 원문(.eml) 다시 열기
+    attachment_files: list[FileLink]  # 첨부 다시 열기
 
 
 class CaseSummary(CamelModel):

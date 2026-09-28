@@ -33,4 +33,13 @@ def save_file(relative_dir: str, filename: str, data: bytes) -> str:
 
 
 def read_file(relative_path: str) -> bytes:
-    return (settings.storage_dir / relative_path).read_bytes()
+    return full_path(relative_path).read_bytes()
+
+
+def full_path(relative_path: str) -> Path:
+    """DB에 저장된 상대 경로 → 실제 파일 경로. 저장소 폴더 밖을 가리키면 거부한다."""
+    root = settings.storage_dir.resolve()
+    path = (root / relative_path).resolve()
+    if root not in path.parents:
+        raise ValueError("저장소 밖의 경로입니다.")
+    return path

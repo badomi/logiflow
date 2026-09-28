@@ -117,6 +117,28 @@ body {
   border-radius: 4px;
 }
 
+.files {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+.files li {
+  padding: 6px 0;
+  border-bottom: 1px solid #edebe9;
+}
+
+.files .file-meta {
+  color: #605e5c;
+}
+
+.files a {
+  margin-right: 8px;
+  color: #1f3a6e;
+  word-break: break-all;
+}
+
 .label {
   display: block;
   margin-bottom: 4px;

@@ -81,6 +81,26 @@ def get_case(case_id: str, session: Session = Depends(get_session)):
         raise _http_error(error) from error
 
 
+@app.get("/api/cases/{case_id}/mails/{index}/raw")
+def download_raw_mail(case_id: str, index: int, session: Session = Depends(get_session)):
+    """[원문 다시 열기] 케이스의 메일 원문(.eml). Outlook 등 메일 프로그램으로 열 수 있다 (FR-103)."""
+    try:
+        path = services.raw_mail_path(session, case_id, index)
+    except services.NotFoundError as error:
+        raise _http_error(error) from error
+    return FileResponse(path, media_type="message/rfc822", filename=f"{case_id}-mail-{index:02d}.eml")
+
+
+@app.get("/api/cases/{case_id}/attachments/{attachment_id}")
+def download_attachment(case_id: str, attachment_id: int, session: Session = Depends(get_session)):
+    """[첨부 다시 열기] 케이스에 저장된 첨부파일 (FR-103)."""
+    try:
+        path, filename = services.attachment_path(session, case_id, attachment_id)
+    except services.NotFoundError as error:
+        raise _http_error(error) from error
+    return FileResponse(path, filename=filename)
+
+
 @app.post("/api/replies/match", response_model=ReplyMatchResult)
 def match_reply(body: MailInput, session: Session = Depends(get_session)):
     """[회신 식별] 선택한 메일이 어느 케이스의 회신인지 후보를 제시한다. 저장은 하지 않는다 (FR-104)."""

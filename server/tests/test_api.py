@@ -43,6 +43,27 @@ def test_attachments_saved(client):
     assert len(case["mails"][0]["snapshot"]["attachments"]) == 2
 
 
+def test_raw_mail_and_attachments_can_be_reopened(client):
+    """FR-103 수용 기준: 메일 원문과 첨부파일을 저장하고 케이스 화면에서 다시 열어볼 수 있다."""
+    case = client.post("/api/cases", json=eml_body("04_insurance_with_attachments.eml")).json()["case"]
+    mail = case["mails"][0]
+
+    raw = client.get(mail["rawUrl"])
+    assert raw.status_code == 200 and raw.content == sample("04_insurance_with_attachments.eml")
+    assert raw.headers["content-type"].startswith("message/rfc822")
+
+    names = [f["filename"] for f in mail["attachmentFiles"]]
+    assert names == ["인보이스_REF-0001.pdf", "패킹리스트_REF-0001.pdf"]
+    first = client.get(mail["attachmentFiles"][0]["url"])
+    assert first.status_code == 200 and first.content.startswith(b"%PDF")
+
+    # 다른 케이스 번호로는 열 수 없고, 없는 번호는 404
+    other = client.post("/api/cases", json=eml_body("01_lcl_request.eml")).json()["case"]["caseId"]
+    att_id = mail["attachmentFiles"][0]["url"].rsplit("/", 1)[-1]
+    assert client.get(f"/api/cases/{other}/attachments/{att_id}").status_code == 404
+    assert client.get(f"/api/cases/{case['caseId']}/mails/9/raw").status_code == 404
+
+
 def test_duplicate_mail_does_not_create_new_case(client):
     """FR-105: 같은 메일을 두 번 등록해도 케이스가 중복 생성되지 않는다."""
     first = client.post("/api/cases", json=eml_body("01_lcl_request.eml")).json()
