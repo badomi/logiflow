@@ -6,12 +6,12 @@ API 문서(자동 생성): http://localhost:8000/docs
 
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from . import drafts, services
+from . import drafts, pipeline, services
 from .db import get_session, init_db
 from .schemas import (
     ActorRequest,
@@ -57,13 +57,19 @@ def health() -> dict:
 
 
 @app.post("/api/cases", response_model=CreateCaseResult)
-def create_case(body: MailInput, session: Session = Depends(get_session)):
-    """[케이스 생성] 담당자가 패널에서 누른다 (FR-101). ID 발급(FR-102)·원문 보관(FR-103)·중복 방지(FR-105)."""
+def create_case(body: MailInput, background: BackgroundTasks, session: Session = Depends(get_session)):
+    """[케이스 생성] 담당자가 패널에서 누른다 (FR-101). ID 발급(FR-102)·원문 보관(FR-103)·중복 방지(FR-105).
+
+    케이스는 즉시 만들어 응답하고, 항목 추출은 응답 뒤 백그라운드에서 실행한다.
+    패널은 GET /api/cases/{id}의 extraction 상태로 진행·결과·걸린 시간(60초 기준)을 확인한다.
+    """
     try:
         parsed, raw, source = services.resolve_input(body)
-        case, duplicate = services.create_case(session, parsed, raw, source, body.actor)
+        case, duplicate, job = services.create_case(session, parsed, raw, source, body.actor)
     except (services.InputError, services.NotFoundError, services.ConflictError) as error:
         raise _http_error(error) from error
+    if job:
+        background.add_task(pipeline.execute, job)
     return CreateCaseResult(duplicate=duplicate, case=services.case_detail(case))
 
 
@@ -187,11 +193,15 @@ def download_quote(case_id: str, filename: str, session: Session = Depends(get_s
 
 
 @app.post("/api/cases/{case_id}/replies", response_model=CaseDetail)
-def merge_reply(case_id: str, body: MailInput, session: Session = Depends(get_session)):
-    """[회신 병합] 담당자가 확인한 케이스에 회신을 합치고 재추출·재검증을 실행한다 (FR-104·FR-207)."""
+def merge_reply(
+    case_id: str, body: MailInput, background: BackgroundTasks, session: Session = Depends(get_session)
+):
+    """[회신 병합] 담당자가 확인한 케이스에 회신을 합치고 재추출·재검증을 백그라운드로 실행한다 (FR-104·FR-207)."""
     try:
         parsed, raw, source = services.resolve_input(body)
-        case = services.merge_reply(session, case_id, parsed, raw, source, body.actor)
+        case, job = services.merge_reply(session, case_id, parsed, raw, source, body.actor)
     except (services.InputError, services.NotFoundError, services.ConflictError) as error:
         raise _http_error(error) from error
+    if job:
+        background.add_task(pipeline.execute, job)
     return services.case_detail(case)

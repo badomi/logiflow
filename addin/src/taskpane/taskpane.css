@@ -117,6 +117,27 @@ body {
   border-radius: 4px;
 }
 
+.extraction {
+  margin: 8px 0;
+  padding: 8px;
+  background: #f3f2f1;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.extraction p {
+  margin: 0;
+}
+
+.fields--compact dt {
+  margin-top: 6px;
+  font-size: 11px;
+}
+
+.fields--compact dd {
+  font-size: 12px;
+}
+
 .files {
   margin: 0;
   padding: 0;

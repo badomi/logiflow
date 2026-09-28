@@ -24,11 +24,11 @@ def test_create_case_from_addin(client):
     assert data["duplicate"] is False
     case = data["case"]
     assert re.fullmatch(r"LQ-\d{4}-\d{4}-\d{3}", case["caseId"])
-    assert case["status"] == "수신"
+    assert case["status"] == "파싱중"  # 응답 시점에는 추출이 도는 중
     mail = case["mails"][0]
     assert mail["role"] == "ORIGINAL" and mail["hasRaw"] is True
     assert mail["snapshot"]["conversationId"] == "CONV-1"  # .eml에 없는 값은 애드인 값으로 보완
-    assert [e["eventType"] for e in case["events"]] == ["CASE_CREATED", "PIPELINE_RUN"]
+    assert [e["eventType"] for e in case["events"]] == ["CASE_CREATED", "PIPELINE_STARTED"]  # 추출은 응답 뒤에
     assert case["events"][0]["actor"] == "quote@leona.example.com"
     assert (settings.storage_dir / case["caseId"] / "mail-01" / "original.eml").read_bytes() == sample(
         "01_lcl_request.eml"
@@ -109,8 +109,11 @@ def test_reply_matched_by_header_then_merged(client):
 
     merged = client.post(f"/api/cases/{case_id}/replies", json=eml_body("03_lcl_reply.eml")).json()
     assert [m["role"] for m in merged["mails"]] == ["ORIGINAL", "REPLY"]
-    events = [(e["eventType"], (e["detail"] or {}).get("trigger")) for e in merged["events"]]
-    assert events[-2:] == [("REPLY_MERGED", None), ("PIPELINE_RUN", "REPLY_MERGED")]
+    assert merged["status"] == "재파싱"  # 응답 시점: 재추출이 백그라운드에서 도는 중
+    after = client.get(f"/api/cases/{case_id}").json()
+    events = [(e["eventType"], (e["detail"] or {}).get("trigger")) for e in after["events"]]
+    assert events[-3:] == [("REPLY_MERGED", None), ("PIPELINE_STARTED", "REPLY_MERGED"), ("PIPELINE_RUN", "REPLY_MERGED")]
+    assert after["extraction"]["trigger"] == "REPLY_MERGED"
 
     # 병합된 뒤에는 '이미 등록됨'으로 나오고, 같은 회신을 다시 병합해도 중복되지 않는다
     again = client.post("/api/replies/match", json=eml_body("03_lcl_reply.eml")).json()
@@ -165,12 +168,57 @@ def test_pipeline_failure_keeps_case(client):
 
     pipeline.register(extractor=Broken())
     try:
-        case = client.post("/api/cases", json=eml_body("01_lcl_request.eml")).json()["case"]
+        case_id = client.post("/api/cases", json=eml_body("01_lcl_request.eml")).json()["case"]["caseId"]
     finally:
         pipeline.register(extractor=pipeline._NotConnected())
+    case = client.get(f"/api/cases/{case_id}").json()
     failed = case["events"][-1]
     assert failed["eventType"] == "PIPELINE_FAILED" and "LLM 응답 없음" in failed["detail"]["error"]
-    assert client.get(f"/api/cases/{case['caseId']}").status_code == 200
+    assert case["status"] == "실패"
+    assert case["extraction"]["state"] == "failed" and "LLM 응답 없음" in case["extraction"]["error"]
+
+
+def test_create_returns_immediately_and_extraction_runs_after(client):
+    """FR-101 수용 기준: 케이스 등록 + 항목 추출 수행. 응답은 바로 오고 추출은 뒤에서 돈다."""
+    first = client.post("/api/cases", json=eml_body("01_lcl_request.eml")).json()["case"]
+    assert first["status"] == "파싱중" and first["extraction"]["state"] == "running"
+
+    after = client.get(f"/api/cases/{first['caseId']}").json()
+    assert after["extraction"]["state"] == "not-connected"  # B트랙 추출기 연결 전
+    assert after["status"] == "수신"  # 추출기가 없으면 원래 상태로 돌아온다
+    assert after["extraction"]["withinLimit"] is True and after["extraction"]["elapsedMs"] >= 0
+
+
+def test_extraction_result_and_60s_check(client, monkeypatch):
+    """추출기가 결과를 주면 패널이 볼 수 있게 저장하고, 60초를 넘기면 withinLimit=False로 표시한다."""
+
+    class Fake:
+        name = "fake-b-track"
+
+        def extract(self, session, case):
+            return {"commodity": {"value": "스프링노트", "evidence": "품목: 스프링노트", "score": 0.95}}
+
+    class FakeValidator:
+        name = "fake-c-track"
+
+        def validate(self, session, case, extraction):
+            case.status = "정보부족"  # C트랙이 상태를 정하면 A트랙은 되돌리지 않는다
+            return {"missing": ["pol", "cargoReadyDate"]}
+
+    pipeline.register(extractor=Fake(), validator=FakeValidator())
+    monkeypatch.setattr(pipeline, "TIME_LIMIT_MS", -1)  # 60초를 넘긴 상황을 흉내
+    try:
+        case_id = client.post("/api/cases", json=eml_body("01_lcl_request.eml")).json()["case"]["caseId"]
+    finally:
+        pipeline.register(extractor=pipeline._NotConnected(), validator=pipeline._NotConnected())
+
+    case = client.get(f"/api/cases/{case_id}").json()
+    extraction = case["extraction"]
+    assert extraction["state"] == "done"
+    assert extraction["result"]["commodity"]["value"] == "스프링노트"
+    assert extraction["validation"] == {"missing": ["pol", "cargoReadyDate"]}
+    assert extraction["withinLimit"] is False
+    assert case["status"] == "정보부족"
 
 
 def test_eml_reader_import(capsys):

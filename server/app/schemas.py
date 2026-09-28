@@ -81,9 +81,24 @@ class CaseSummary(CamelModel):
     created_at: datetime
 
 
+class ExtractionState(CamelModel):
+    """가장 최근 추출(파이프라인) 실행 상태 — 패널이 진행·결과·60초 기준을 보여줄 때 쓴다 (FR-101)."""
+
+    state: str  # none(실행 기록 없음) / running / done / not-connected(추출기 미연결) / failed
+    trigger: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    elapsed_ms: int | None = None
+    within_limit: bool | None = None  # 60초 이내인지
+    result: dict | None = None  # B트랙 추출 결과
+    validation: dict | None = None  # C트랙 검증 결과
+    error: str | None = None
+
+
 class CaseDetail(CaseSummary):
     mails: list[MailOut]
     events: list[EventOut]
+    extraction: ExtractionState
 
 
 class CreateCaseResult(CamelModel):

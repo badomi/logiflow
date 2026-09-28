@@ -14,7 +14,7 @@ import {
   recordMailEvent,
   supplementDraft,
 } from "./api";
-import type { Draft, MailInput, ReplyCandidate } from "./api";
+import type { Draft, ExtractionState, MailInput, ReplyCandidate } from "./api";
 import { currentUserEmail, readSelectedMail, readSelectedMailRaw } from "./mail";
 import type { MailSnapshot } from "./mail";
 
@@ -162,7 +162,7 @@ async function onMerge(caseId: string) {
   try {
     await mergeReply(caseId, current);
     renderCaseState(caseId, []);
-    setStatus(`${caseId} 케이스에 회신을 병합했습니다. 추출·검증을 다시 실행했습니다.`, "success");
+    setStatus(`${caseId} 케이스에 회신을 병합했습니다. 추출·검증을 다시 실행합니다.`, "success");
   } catch (error) {
     setStatus(messageOf(error), "error");
   } finally {
@@ -284,6 +284,7 @@ function resetCaseArea() {
   sentCaseId = null;
   document.getElementById("sent-section")!.hidden = true;
   document.getElementById("files-section")!.hidden = true;
+  document.getElementById("extraction")!.hidden = true;
   setText("case-state", "");
   showCreateButton(false);
   document.getElementById("draft-section")!.hidden = true;
@@ -313,14 +314,24 @@ function renderCaseState(registeredCaseId: string | null, candidates: ReplyCandi
   renderReplySection(candidates);
 }
 
-/** 케이스에 저장된 메일 원문·첨부를 다시 열 수 있게 링크로 보여준다 (FR-103). */
-async function renderCaseFiles(caseId: string) {
+/** 추출 상태를 다시 확인하는 간격과 최대 대기 시간 — 담당자가 버튼을 누른 뒤에만, 우리 백엔드에만 묻는다 (사서함 폴링 아님) */
+const EXTRACTION_CHECK_MS = 2000;
+const EXTRACTION_WAIT_LIMIT_MS = 90_000;
+
+/**
+ * 케이스 정보(추출 상태·자료)를 불러와 그린다. 추출이 도는 중이면 끝날 때까지 몇 초마다 다시 확인한다.
+ */
+async function renderCaseFiles(caseId: string, waitedMs = 0) {
   const token = loadToken;
   const section = document.getElementById("files-section")!;
   const list = document.getElementById("case-files")!;
   try {
     const detail = await getCase(caseId);
     if (token !== loadToken || currentCaseId !== caseId) return;
+    renderExtraction(detail.extraction, waitedMs);
+    if (detail.extraction.state === "running" && waitedMs < EXTRACTION_WAIT_LIMIT_MS) {
+      setTimeout(() => renderCaseFiles(caseId, waitedMs + EXTRACTION_CHECK_MS), EXTRACTION_CHECK_MS);
+    }
     list.replaceChildren();
     for (const mail of detail.mails) {
       const item = document.createElement("li");
@@ -336,6 +347,46 @@ async function renderCaseFiles(caseId: string) {
     section.hidden = detail.mails.length === 0;
   } catch {
     section.hidden = true; // 자료 목록을 못 불러와도 다른 기능은 그대로 쓴다
+  }
+}
+
+/** 항목 추출 상태를 보여준다 (FR-101: 추출 수행, 60초 이내). */
+function renderExtraction(extraction: ExtractionState, waitedMs: number) {
+  const box = document.getElementById("extraction")!;
+  const result = document.getElementById("extraction-result")!;
+  result.replaceChildren();
+  box.hidden = extraction.state === "none";
+
+  const seconds = extraction.elapsedMs != null ? (extraction.elapsedMs / 1000).toFixed(1) : null;
+  const limit = extraction.withinLimit === false ? " · ⚠ 60초 기준 초과" : "";
+  const messages: Record<ExtractionState["state"], string> = {
+    none: "",
+    running:
+      waitedMs >= EXTRACTION_WAIT_LIMIT_MS
+        ? "항목 추출이 오래 걸리고 있습니다. 잠시 뒤 패널을 다시 열어 확인해 주세요."
+        : `항목 추출 중… (${Math.round(waitedMs / 1000)}초)`,
+    done: `항목 추출 완료 (${seconds}초${limit})`,
+    "not-connected": `항목 추출: B트랙 추출기 연결 전이라 실행만 기록했습니다 (${seconds}초)`,
+    failed: `항목 추출 실패: ${extraction.error ?? "알 수 없는 오류"} — 케이스와 원문은 저장되어 있습니다`,
+  };
+  setText("extraction-state", messages[extraction.state]);
+
+  // B트랙 결과: { 필드명: 값 } 또는 { 필드명: { value, evidence, score } } 형태를 그대로 보여준다
+  for (const [field, raw] of Object.entries(extraction.result ?? {})) {
+    const value = raw && typeof raw === "object" && "value" in raw ? (raw as { value: unknown }).value : raw;
+    const dt = document.createElement("dt");
+    dt.textContent = field;
+    const dd = document.createElement("dd");
+    dd.textContent = value == null ? "-" : String(value);
+    result.append(dt, dd);
+  }
+  const missing = (extraction.validation as { missing?: unknown } | null)?.missing;
+  if (Array.isArray(missing) && missing.length) {
+    const dt = document.createElement("dt");
+    dt.textContent = "빠진 항목";
+    const dd = document.createElement("dd");
+    dd.textContent = missing.join(", ");
+    result.append(dt, dd);
   }
 }
 

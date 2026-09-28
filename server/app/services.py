@@ -18,6 +18,7 @@ from .schemas import (
     CaseDetail,
     CaseSummary,
     EventOut,
+    ExtractionState,
     FileLink,
     MailInput,
     MailOut,
@@ -85,11 +86,14 @@ def find_registered_mail(session: Session, internet_message_id: str | None) -> M
 
 def create_case(
     session: Session, parsed: ParsedMail, raw: bytes | None, source: str, actor: str | None
-) -> tuple[Case, bool]:
-    """메일 1통으로 케이스를 만든다. 이미 등록된 메일이면 기존 케이스를 돌려준다 (duplicate=True)."""
+) -> tuple[Case, bool, pipeline.Job | None]:
+    """메일 1통으로 케이스를 만든다. 이미 등록된 메일이면 기존 케이스를 돌려준다 (duplicate=True).
+
+    추출은 여기서 기다리지 않는다. 돌려준 Job을 호출한 쪽이 백그라운드로 pipeline.execute() 한다 (FR-101 60초).
+    """
     existing = find_registered_mail(session, parsed.snapshot.internet_message_id)
     if existing is not None:
-        return existing.case, True
+        return existing.case, True, None
 
     case = Case(case_id=issue_case_id(session), status="수신", created_by=actor)
     session.add(case)
@@ -97,8 +101,7 @@ def create_case(
     _add_event(session, case, "CASE_CREATED", actor, {"source": source, "subject": parsed.snapshot.subject})
     session.commit()
 
-    pipeline.run(session, case, trigger="CASE_CREATED", actor=actor)
-    return case, False
+    return case, False, pipeline.start(session, case, trigger="CASE_CREATED", actor=actor)
 
 
 def _add_mail(session: Session, case: Case, role: str, parsed: ParsedMail, raw: bytes | None, source: str) -> Mail:
@@ -211,23 +214,22 @@ def is_leona_sent_mail(session: Session, internet_message_id: str | None) -> boo
 
 def merge_reply(
     session: Session, case_id: str, parsed: ParsedMail, raw: bytes | None, source: str, actor: str | None
-) -> Case:
-    """담당자가 확인한 케이스에 회신을 합치고, 추출→검증을 다시 실행한다 (FR-104·FR-207)."""
+) -> tuple[Case, pipeline.Job | None]:
+    """담당자가 확인한 케이스에 회신을 합치고, 추출→검증 재실행 작업을 돌려준다 (FR-104·FR-207)."""
     case = get_case(session, case_id)
     if is_leona_sent_mail(session, parsed.snapshot.internet_message_id):
         raise ConflictError("LEONA가 보낸 메일입니다. 화주 회신만 병합할 수 있습니다.")
     existing = find_registered_mail(session, parsed.snapshot.internet_message_id)
     if existing is not None:
         if existing.case_pk == case.id:
-            return case  # 이미 이 케이스에 합쳐진 회신 — 다시 눌러도 결과가 같다
+            return case, None  # 이미 이 케이스에 합쳐진 회신 — 다시 눌러도 결과가 같다
         raise ConflictError(f"이 메일은 이미 {existing.case.case_id} 케이스에 등록되어 있습니다.")
 
     _add_mail(session, case, "REPLY", parsed, raw, source)
     _add_event(session, case, "REPLY_MERGED", actor, {"subject": parsed.snapshot.subject})
     session.commit()
 
-    pipeline.run(session, case, trigger="REPLY_MERGED", actor=actor)
-    return case
+    return case, pipeline.start(session, case, trigger="REPLY_MERGED", actor=actor)
 
 
 # ---------------------------------------------------------------- 조회
@@ -290,6 +292,43 @@ def case_detail(case: Case) -> CaseDetail:
             )
             for e in case.events
         ],
+        extraction=extraction_state(case),
+    )
+
+
+def extraction_state(case: Case) -> ExtractionState:
+    """가장 최근 PIPELINE_STARTED와 그 뒤의 결과 이력으로 추출 상태를 만든다."""
+    started = None
+    finished = None
+    for event in case.events:
+        if event.event_type == "PIPELINE_STARTED":
+            started, finished = event, None
+        elif event.event_type in ("PIPELINE_RUN", "PIPELINE_FAILED") and started is not None:
+            finished = event
+    if started is None:
+        return ExtractionState(state="none")
+
+    begin = json.loads(started.detail or "{}")
+    if finished is None:
+        return ExtractionState(state="running", trigger=begin.get("trigger"), started_at=_as_utc(started.created_at))
+
+    detail = json.loads(finished.detail or "{}")
+    if finished.event_type == "PIPELINE_FAILED":
+        state = "failed"
+    elif detail.get("extractor") == "not-connected":
+        state = "not-connected"
+    else:
+        state = "done"
+    return ExtractionState(
+        state=state,
+        trigger=detail.get("trigger"),
+        started_at=_as_utc(started.created_at),
+        finished_at=_as_utc(finished.created_at),
+        elapsed_ms=detail.get("elapsedMs"),
+        within_limit=detail.get("withinLimit"),
+        result=detail.get("extraction"),
+        validation=detail.get("validation"),
+        error=detail.get("error"),
     )
 
 

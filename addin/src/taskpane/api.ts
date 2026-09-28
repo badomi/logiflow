@@ -37,6 +37,20 @@ export interface CaseDetail extends CaseSummary {
     snapshot: { subject: string; receivedAt: string | null; from: { name: string; email: string } };
   }[];
   events: { eventType: string; actor: string | null; detail: Record<string, string> | null; createdAt: string }[];
+  extraction: ExtractionState;
+}
+
+/** 가장 최근 항목 추출 실행 상태 (FR-101: 추출 수행, 60초 이내) */
+export interface ExtractionState {
+  state: "none" | "running" | "done" | "not-connected" | "failed";
+  trigger: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  elapsedMs: number | null;
+  withinLimit: boolean | null;
+  result: Record<string, unknown> | null;
+  validation: Record<string, unknown> | null;
+  error: string | null;
 }
 
 export interface ReplyCandidate {

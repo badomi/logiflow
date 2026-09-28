@@ -58,14 +58,16 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _import(files: list[Path], actor: str) -> int:
-    from . import services
+    from . import pipeline, services
     from .db import SessionLocal, init_db
 
     init_db()
     with SessionLocal() as session:
         for file in files:
             raw = file.read_bytes()
-            case, duplicate = services.create_case(session, parse_eml(raw), raw, "EML", actor)
+            case, duplicate, job = services.create_case(session, parse_eml(raw), raw, "EML", actor)
+            if job:
+                pipeline.execute(job)  # 일괄 등록은 한 건씩 추출까지 끝내고 다음으로 간다
             print(f"{file.name}: {case.case_id}{' (이미 등록됨)' if duplicate else ''}")
     return 0
 
