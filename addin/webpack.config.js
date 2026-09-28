@@ -90,6 +90,13 @@ module.exports = async (env, options) => {
         options: env.WEBPACK_BUILD || options.https !== undefined ? options.https : await getHttpsOptions(),
       },
       port: process.env.npm_package_config_dev_server_port || 3000,
+      // 패널의 /api 요청을 로컬 Python 백엔드(A트랙 API)로 넘긴다. 같은 주소로 보이므로 CORS·인증서 문제가 없다.
+      proxy: [
+        {
+          context: ["/api"],
+          target: "http://localhost:8000",
+        },
+      ],
     },
   };
 

@@ -27,6 +27,23 @@
     <main id="app-body" class="main" style="display: none;">
         <p id="status" class="status" hidden></p>
 
+        <!-- 케이스 등록 상태와 [케이스 생성] 버튼 (FR-101) -->
+        <section class="card">
+            <p id="case-state" class="case-state"></p>
+            <button id="create-case" class="button button--primary" hidden>케이스 생성</button>
+        </section>
+
+        <!-- 회신 연결 (FR-104): 자동 후보 → 담당자가 골라 병합, 후보가 없으면 직접 선택 -->
+        <section id="reply-section" class="card" hidden>
+            <h2>회신으로 병합</h2>
+            <ul id="reply-candidates" class="candidates"></ul>
+            <details id="manual-select">
+                <summary>케이스 직접 선택</summary>
+                <select id="case-select"></select>
+                <button id="merge-selected" class="button">선택한 케이스에 병합</button>
+            </details>
+        </section>
+
         <dl class="fields">
             <dt>제목</dt>
             <dd id="subject">-</dd>

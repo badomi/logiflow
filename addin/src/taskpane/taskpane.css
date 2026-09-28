@@ -41,6 +41,74 @@ body {
   color: #a4262c;
 }
 
+.status--success {
+  background: #dff6dd;
+  color: #107c10;
+}
+
+.card {
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid #edebe9;
+  border-radius: 4px;
+}
+
+.card h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.case-state {
+  margin: 0 0 8px;
+}
+
+.button {
+  padding: 6px 12px;
+  border: 1px solid #8a8886;
+  border-radius: 2px;
+  background: #ffffff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.button--primary {
+  border-color: #1f3a5f;
+  background: #1f3a5f;
+  color: #ffffff;
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.candidates {
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.candidates li {
+  padding: 8px 0;
+  border-bottom: 1px solid #edebe9;
+}
+
+.candidate__title {
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.candidate__reason {
+  margin: 2px 0 6px;
+  font-size: 12px;
+  color: #605e5c;
+}
+
+#manual-select select {
+  width: 100%;
+  margin: 8px 0;
+}
+
 .fields {
   margin: 0;
 }
