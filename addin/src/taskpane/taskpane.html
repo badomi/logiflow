@@ -1,54 +1,56 @@
-<!-- Copyright (c) Microsoft Corporation. All rights reserved. Licensed under the MIT License. -->
-<!-- This file shows how to design a first-run page that provides a welcome screen to the user about the features of the add-in. -->
-
 <!DOCTYPE html>
-<html>
+<html lang="ko">
 
 <head>
     <meta charset="UTF-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Contoso Task Pane Add-in</title>
+    <title>LEONA 자동견적</title>
 
-    <!-- Office JavaScript API -->
+    <!-- Office JavaScript API: Outlook과 대화하는 공식 라이브러리 -->
     <script type="text/javascript" src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 
-    <!-- For more information on Fluent UI, visit https://developer.microsoft.com/fluentui#/. -->
-    <link rel="stylesheet" href="https://res-1.cdn.office.net/files/fabric-cdn-prod_20230815.002/office-ui-fabric-core/11.1.0/css/fabric.min.css"/>
-
-    <!-- Template styles -->
     <link href="taskpane.css" rel="stylesheet" type="text/css" />
 </head>
 
-<body class="ms-font-m ms-welcome ms-Fabric">
-    <header class="ms-welcome__header ms-bgColor-neutralLighter">
-        <img width="90" height="90" src="../../assets/logo-filled.png" alt="Contoso" title="Contoso" />
-        <h1 class="ms-font-su">Welcome</h1>
+<body>
+    <header class="header">
+        <h1>LEONA 자동견적</h1>
+        <p>선택한 메일 정보</p>
     </header>
-    <section id="sideload-msg" class="ms-welcome__main">
-        <h2 class="ms-font-xl">Please <a target="_blank" href="https://learn.microsoft.com/office/dev/add-ins/testing/test-debug-office-add-ins#sideload-an-office-add-in-for-testing">sideload</a> your add-in to see app body.</h2>
+
+    <!-- Outlook 밖(일반 브라우저)에서 열었을 때만 보이는 안내 -->
+    <section id="sideload-msg" class="main">
+        <p>이 페이지는 Outlook에 추가 기능으로 설치(사이드로드)한 뒤 메일을 선택해야 동작합니다.</p>
     </section>
-    <main id="app-body" class="ms-welcome__main" style="display: none;">
-        <h2 class="ms-font-xl"> Discover what Office Add-ins can do for you today! </h2>
-        <ul class="ms-List ms-welcome__features">
-            <li class="ms-ListItem">
-                <i class="ms-Icon ms-Icon--Ribbon ms-font-xl"></i>
-                <span class="ms-font-m">Achieve more with Office integration</span>
-            </li>
-            <li class="ms-ListItem">
-                <i class="ms-Icon ms-Icon--Unlock ms-font-xl"></i>
-                <span class="ms-font-m">Unlock features and functionality</span>
-            </li>
-            <li class="ms-ListItem">
-                <i class="ms-Icon ms-Icon--Design ms-font-xl"></i>
-                <span class="ms-font-m">Create and visualize like a pro</span>
-            </li>
-        </ul>
-        <p class="ms-font-l">Modify the source files, then click <b>Run</b>.</p>
-        <div role="button" id="run" class="ms-welcome__action ms-Button ms-Button--hero ms-font-xl">
-            <span class="ms-Button-label">Run</span>
-        </div>
-        <p><label id="item-subject"></label></p>
+
+    <main id="app-body" class="main" style="display: none;">
+        <p id="status" class="status" hidden></p>
+
+        <dl class="fields">
+            <dt>제목</dt>
+            <dd id="subject">-</dd>
+
+            <dt>발신자</dt>
+            <dd id="from">-</dd>
+
+            <dt>수신 시각</dt>
+            <dd id="received-at">-</dd>
+
+            <dt>본문 앞부분</dt>
+            <dd id="body-preview" class="preview">-</dd>
+
+            <dt>conversationId</dt>
+            <dd id="conversation-id" class="mono">-</dd>
+
+            <dt>internetMessageId</dt>
+            <dd id="internet-message-id" class="mono">-</dd>
+        </dl>
+
+        <details class="json">
+            <summary>메일 표준 JSON 보기</summary>
+            <pre id="snapshot-json"></pre>
+        </details>
     </main>
 </body>
 
