@@ -7,8 +7,10 @@
  * - 작성 창이 열릴 때(OnNewMessageCompose): 패널이 준비한 초안이면 제목·첨부를 채우고 초안함에 저장 (FR-304·505)
  * - 보내기를 누를 때(OnMessageSend): 발송 시각·수행자 기록 (FR-505). 보내기를 막거나 대신 보내지 않는다.
  *
- * 2026-09-28 테스트: 개인이 사이드로드한 Outlook 웹(학교 계정)에서는 이 백그라운드 실행 환경이 동작하지 않았다.
- * 그 환경에서는 작성 창의 [LEONA 초안 마무리] 버튼이 여는 패널(taskpane)이 같은 일을 한다.
+ * 2026-09-28 테스트: 개인이 사이드로드한 Outlook 웹(학교 계정)에서는 백그라운드 실행 환경이 동작하지 않아
+ * 보내기 이벤트가 끝나지 않고 모든 메일 발송을 붙잡았다. 그래서 현재 manifest.xml에서는 LaunchEvent를 뺐다.
+ * 사내 관리자 배포에서 쓰려면 manifest의 VersionOverrides 1.1에 Runtimes·LaunchEvent를 다시 넣고 먼저 검증한다.
+ * 지금은 작성 창 [LEONA 초안 마무리] 패널(초안 저장)과 보낸 편지함 [발송 기록](FR-505)이 이 역할을 한다.
  */
 
 import { call, finalizeDraft, userEmail } from "../shared/finalize";

@@ -123,19 +123,13 @@
     <!-- 1.1 규격을 아는 Outlook은 아래 설정을 쓰고, 모르는 Outlook은 위(1.0) 설정을 쓴다 -->
     <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides/1.1" xsi:type="VersionOverridesV1_1">
       <Requirements>
-        <!-- 1.12: 보내기 이벤트(OnMessageSend)에 필요한 최소 버전 -->
-        <bt:Sets DefaultMinVersion="1.12">
+        <!-- 1.8: 작성 중 초안에 Base64 첨부(addFileAttachmentFromBase64Async)에 필요한 최소 버전 -->
+        <bt:Sets DefaultMinVersion="1.8">
           <bt:Set Name="Mailbox"/>
         </bt:Sets>
       </Requirements>
       <Hosts>
         <Host xsi:type="MailHost">
-          <!-- 이벤트 처리기가 실행될 곳: Outlook 웹·새 Outlook은 HTML, 데스크톱 Outlook은 JavaScript 파일 -->
-          <Runtimes>
-            <Runtime resid="WebViewRuntime.Url">
-              <Override type="javascript" resid="JSRuntime.Url"/>
-            </Runtime>
-          </Runtimes>
           <DesktopFormFactor>
             <FunctionFile resid="Commands.Url"/>
             <!-- 메일 읽기 화면의 리본/메뉴에 버튼 1개를 추가한다 -->
@@ -187,16 +181,6 @@
                 </Group>
               </OfficeTab>
             </ExtensionPoint>
-            <!-- 이벤트 기반 실행: 사용자가 작성 창을 열거나 보내기를 누를 때만 실행된다 (폴링 아님) -->
-            <ExtensionPoint xsi:type="LaunchEvent">
-              <LaunchEvents>
-                <!-- 작성 창이 열리면: 패널이 준비한 초안이면 제목·첨부를 채우고 초안함에 저장 (FR-304·505) -->
-                <LaunchEvent Type="OnNewMessageCompose" FunctionName="onNewMessageComposeHandler"/>
-                <!-- 보내기를 누르면: 발송 시각·수행자 기록만 한다. PromptUser = 애드인 오류 시에도 담당자가 그대로 보낼 수 있음 -->
-                <LaunchEvent Type="OnMessageSend" FunctionName="onMessageSendHandler" SendMode="PromptUser"/>
-              </LaunchEvents>
-              <SourceLocation resid="WebViewRuntime.Url"/>
-            </ExtensionPoint>
           </DesktopFormFactor>
         </Host>
       </Hosts>
@@ -209,8 +193,6 @@
         <bt:Urls>
           <bt:Url id="Commands.Url" DefaultValue="https://localhost:3000/commands.html"/>
           <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/taskpane.html"/>
-          <bt:Url id="WebViewRuntime.Url" DefaultValue="https://localhost:3000/commands.html"/>
-          <bt:Url id="JSRuntime.Url" DefaultValue="https://localhost:3000/commands.js"/>
         </bt:Urls>
         <bt:ShortStrings>
           <bt:String id="GroupLabel" DefaultValue="LEONA 자동견적"/>
