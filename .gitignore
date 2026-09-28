@@ -1,0 +1,33 @@
+# 의존성 패키지 (npm install로 다시 받을 수 있음)
+node_modules/
+
+# 빌드 결과물
+dist/
+build/
+coverage/
+
+# 환경 변수·비밀값 (NFR-04: 인증키·토큰 커밋 금지)
+.env
+.env.*
+!.env.example
+
+# 인증서·개인키 (개발용 HTTPS 인증서 포함)
+*.pem
+*.key
+*.crt
+*.cer
+*.pfx
+*.p12
+.office-addin-dev-certs/
+
+# 로그
+*.log
+npm-debug.log*
+
+# 에디터·OS 파일
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+~$*
