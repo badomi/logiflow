@@ -108,6 +108,20 @@ def test_sent_mail_recorded_once_with_real_send_time(client):
     assert first["status"] == second["status"] == "발송완료"
 
 
+def test_sent_time_taken_from_eml_date_header(client):
+    """보낸 메일 원문을 함께 보내면 Date 헤더(실제 발송 시각)를 쓴다 — Outlook 생성 시각(초안 작성 시각)이 아니라."""
+    case_id = make_case(client)
+    body = {
+        "eventType": "MAIL_SENT",
+        "subject": f"RE: [{case_id}] 견적 보완 요청",
+        "internetMessageId": "<sample-03-lcl-reply@example.com>",
+        "occurredAt": "2026-09-28T09:00:00+09:00",  # 틀린 값(초안 생성 시각)을 줘도
+        "emlBase64": base64.b64encode(sample("03_lcl_reply.eml")).decode(),  # 원문 Date: 2026-09-29 09:00 KST
+    }
+    events = client.post(f"/api/cases/{case_id}/mail-events", json=body).json()["events"]
+    assert events[-1]["detail"]["sentAt"] == "2026-09-29T00:00:00+00:00"
+
+
 def test_unknown_mail_event_rejected(client):
     case_id = make_case(client)
     res = client.post(f"/api/cases/{case_id}/mail-events", json={"eventType": "AUTO_SEND"})

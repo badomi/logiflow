@@ -22,6 +22,7 @@ export interface CaseSummary {
 
 export interface CaseDetail extends CaseSummary {
   mails: { role: string; source: string; hasRaw: boolean }[];
+  events: { eventType: string; actor: string | null; detail: Record<string, string> | null; createdAt: string }[];
 }
 
 export interface ReplyCandidate {
@@ -116,7 +117,7 @@ export function recordMailEvent(
   subject: string,
   actor: string,
   kind?: string,
-  sent?: { internetMessageId: string; occurredAt: string }
+  sent?: { internetMessageId: string; occurredAt: string; emlBase64: string | null }
 ) {
   return request<CaseDetail>("POST", `/cases/${encodeURIComponent(caseId)}/mail-events`, {
     eventType,

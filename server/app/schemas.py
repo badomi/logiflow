@@ -122,6 +122,7 @@ class MailEventRequest(CamelModel):
     actor: str | None = None
     internet_message_id: str | None = None  # 보낸 메일의 ID — 같은 발송을 두 번 기록하지 않는다
     occurred_at: datetime | None = None  # 실제 발송 시각 (보낸 편지함 메일에서 기록할 때)
+    eml_base64: str | None = None  # 보낸 메일 원문 — 있으면 Date 헤더(실제 발송 시각)를 우선한다
 
 
 class ReplyMatchResult(CamelModel):

@@ -122,6 +122,11 @@ def mail_event(case_id: str, body: MailEventRequest, session: Session = Depends(
     """[초안 저장·발송 기록] Outlook 작성 창과 보내기 이벤트가 호출한다. 기록만 하고 발송하지 않는다 (FR-505)."""
     try:
         case = services.get_case(session, case_id)
+        occurred_at = body.occurred_at
+        if body.eml_base64:
+            # 보낸 메일 원문의 Date 헤더가 실제 발송 시각이다 (Outlook의 생성 시각은 초안을 만든 시각)
+            parsed, _, _ = services.resolve_input(MailInput(eml_base64=body.eml_base64))
+            occurred_at = parsed.snapshot.received_at or occurred_at
         drafts.record_mail_event(
             session,
             case,
@@ -130,9 +135,9 @@ def mail_event(case_id: str, body: MailEventRequest, session: Session = Depends(
             body.subject,
             body.actor,
             internet_message_id=body.internet_message_id,
-            occurred_at=body.occurred_at,
+            occurred_at=occurred_at,
         )
-    except (services.NotFoundError, drafts.DraftError) as error:
+    except (services.NotFoundError, services.InputError, drafts.DraftError) as error:
         raise _http_error(error) from error
     return services.case_detail(case)
 

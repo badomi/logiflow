@@ -189,18 +189,31 @@ function renderSentState(mail: MailSnapshot) {
 async function onRecordSent() {
   if (!current || !sentCaseId) return;
   const mail = current.snapshot;
+  // 보낸 메일의 '생성 시각'은 초안을 처음 만든 시각이다. 실제 발송 시각은 원문 Date 헤더(백엔드가 읽음),
+  // 원문이 없으면 Outlook의 마지막 수정 시각(발송 시점)을 쓴다.
   setBusy(true);
   try {
-    await recordMailEvent(sentCaseId, "MAIL_SENT", mail.subject, currentUserEmail(), undefined, {
+    const item = Office.context.mailbox.item as Office.MessageRead;
+    const fallback = toIsoOrNow(item.dateTimeModified ?? item.dateTimeCreated);
+    const result = await recordMailEvent(sentCaseId, "MAIL_SENT", mail.subject, currentUserEmail(), undefined, {
       internetMessageId: mail.internetMessageId,
-      occurredAt: mail.receivedAt,
+      occurredAt: fallback,
+      emlBase64: current.emlBase64,
     });
-    setStatus(`${sentCaseId} 발송 이력을 기록했습니다 (발송 시각 ${new Date(mail.receivedAt).toLocaleString("ko-KR")}).`, "success");
+    const sent = [...result.events].reverse().find((e) => e.eventType === "MAIL_SENT");
+    const sentAt = sent?.detail?.sentAt ?? fallback;
+    setStatus(`${sentCaseId} 발송 이력을 기록했습니다 (발송 시각 ${new Date(sentAt).toLocaleString("ko-KR")}).`, "success");
   } catch (error) {
     setStatus(messageOf(error), "error");
   } finally {
     setBusy(false);
   }
+}
+
+/** Outlook 날짜 값(Date 또는 문자열)을 ISO 문자열로. 읽을 수 없으면 지금 시각. */
+function toIsoOrNow(value: unknown): string {
+  const date = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
 }
 
 async function onSupplementDraft() {
