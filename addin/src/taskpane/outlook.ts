@@ -85,7 +85,7 @@ async function runComposeFinalize() {
   try {
     const pending = await findPendingDraft(item);
     if (!pending) {
-      setText("compose-state", "LEONA 패널에서 연 초안이 아닙니다. 받은 메일의 LEONA 패널에서 [초안 열기]를 먼저 눌러 주세요.");
+      setText("compose-state", "LEONA 패널에서 연 초안이 아니라서 바꾸지 않았습니다. 직접 쓴 회신·새 메일은 그대로 보내면 됩니다. 보완 요청·견적서 송부라면 케이스 메일의 LEONA 패널에서 [보완 요청 초안 열기] 또는 [견적서 송부 초안 열기]를 먼저 누르세요.");
       return;
     }
     await finalizeDraft(item, pending, (step) => setText("compose-state", step));
@@ -331,10 +331,15 @@ function renderCaseState(registeredCaseId: string | null, candidates: ReplyCandi
   }
 
   showCreateButton(true);
+  // 회신 후보가 있으면 [병합]이 주 버튼이다. [케이스 생성]은 '예전 대화로 온 새 요청'일 때만 쓰므로 보조 버튼으로 내린다
+  const hasCandidate = candidates.length > 0;
+  const create = document.getElementById("create-case")!;
+  create.classList.toggle("button--primary", !hasCandidate);
+  create.textContent = hasCandidate ? "새 요청이면: 케이스 생성" : "케이스 생성";
   setText(
     "case-state",
-    candidates.length
-      ? "기존 케이스의 회신으로 보입니다. 맞는 케이스에 병합하거나, 새 요청이면 케이스를 생성하세요."
+    hasCandidate
+      ? `기존 케이스 ${candidates[0].caseId}의 회신으로 보입니다. 아래 [병합]을 누르세요. 예전 대화로 온 새 요청일 때만 케이스를 새로 만드세요.`
       : "아직 케이스로 등록되지 않은 메일입니다."
   );
   renderReplySection(candidates);
@@ -433,7 +438,7 @@ function renderReplySection(candidates: ReplyCandidate[]) {
   const fromMe = current?.snapshot.from.email.toLowerCase() === currentUserEmail().toLowerCase();
   document.getElementById("reply-warning")!.hidden = !(fromMe && candidates.length > 0);
 
-  for (const candidate of candidates) {
+  candidates.forEach((candidate, index) => {
     const item = document.createElement("li");
 
     const title = document.createElement("div");
@@ -445,13 +450,14 @@ function renderReplySection(candidates: ReplyCandidate[]) {
     reason.textContent = `근거: ${candidate.reasons.map((r) => REASON_LABELS[r] ?? r).join(", ")}`;
 
     const button = document.createElement("button");
-    button.className = "button";
+    // 가장 근거가 강한 첫 후보를 주 버튼으로. 담당자 본인이 보낸 메일이면 주 버튼으로 권하지 않는다
+    button.className = index === 0 && !fromMe ? "button button--primary" : "button";
     button.textContent = `${candidate.caseId}에 병합`;
     button.onclick = () => onMerge(candidate.caseId);
 
     item.append(title, reason, button);
     list.appendChild(item);
-  }
+  });
   fillCaseSelect();
 }
 
