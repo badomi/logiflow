@@ -178,7 +178,11 @@ def quote_draft(session: Session, case: Case, actor: str | None) -> DraftOut:
     """견적서 송부 초안. 견적서 PDF·XLSX를 첨부한다 (FR-505)."""
     files = quote_files(case)
     if not files:
-        raise DraftError("첨부할 견적서가 없습니다. 견적서(PDF·XLSX) 생성 후 다시 시도하세요.")
+        raise DraftError(
+            "이 케이스에 등록된 견적서가 없어 송부 초안을 만들지 않았습니다. "
+            "견적서(PDF·XLSX)가 생성·등록된 뒤 다시 누르세요. "
+            f"(C트랙 견적서 생성 연결 전: http://localhost:8000/docs 의 POST /api/cases/{case.case_id}/quotes 로 등록)"
+        )
 
     subject = f"[{case.case_id}] 견적서 송부 / Quotation - {_original(case).subject or ''}".strip()
     names = "".join(f"<li>{escape(f.name)}</li>" for f in files)
