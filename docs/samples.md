@@ -285,4 +285,9 @@ FOB 조건으로 공장 출고지부터 본선 적재까지 발생하는 국내 
 | LCL견적서_예시.pdf | 421.7 KiB | LCL 견적서 예시 |
 | FOB견적서_예시.pdf | 416 KiB | FOB 견적서 예시 |
 
-→ `docs/`에 보관. C트랙 견적서 생성(FR-504) 기준, A트랙 견적서 송부 초안(FR-505) 테스트 첨부로 사용.
+→ `docs/양식/`에 보관(2026-09-29 수령). C트랙 견적서 생성(FR-504) 기준, A트랙 견적서 송부 초안(FR-505) 테스트 첨부로 사용.
+
+양식 확인 메모:
+- xlsx 시트명 "CIF 견적서 (FCL, 20')", 비용 11행(OCEAN FREIGHT~INSURANCE FEE) + TOTAL(USD+KRW), DATE 셀은 `=TODAY()`.
+- LCL 예시: INCHEON-SYDNEY, CIF, USD500.00 + KRW286,203 / FOB 예시: BUSAN, 40HQ×1, 통관·보험 AT COST.
+- **세 양식 모두 케이스 ID(LQ-…) 표기 칸이 없음** → FR-102("견적서에 동일 표기")를 위해 C트랙이 표기 위치를 정해야 함.
