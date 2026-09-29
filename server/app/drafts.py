@@ -55,7 +55,11 @@ def supplement_draft(session: Session, case: Case, questions: list[str], actor: 
     """보완 요청 초안. 문항은 누락 항목 그대로 번호를 붙인다 — 임의로 더하거나 빼지 않는다 (FR-305)."""
     questions = [q.strip() for q in questions if q and q.strip()]
     if not questions:
-        raise DraftError("보완 요청 문항이 없습니다.")
+        raise DraftError(
+            "입력한 보완 요청 문항이 없어 초안을 만들지 않았습니다. "
+            "'메일 초안' 칸에 화주에게 물어볼 항목을 한 줄에 하나씩 입력한 뒤 다시 누르세요. "
+            "(C트랙 누락 판정 연결 후에는 문항이 자동으로 채워집니다)"
+        )
 
     subject = f"[{case.case_id}] 견적 보완 요청 / Request for additional information - {_original(case).subject or ''}".strip()
     items = "".join(f"<li>{escape(q)}</li>" for q in questions)

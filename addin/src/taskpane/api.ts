@@ -90,10 +90,10 @@ async function request<T>(method: "GET" | "POST", path: string, body?: unknown):
     throw new ApiError("백엔드 서버에 연결할 수 없습니다. server 폴더에서 API 서버가 실행 중인지 확인하세요.");
   }
   if (!response.ok) {
-    const detail = await response
-      .json()
-      .then((data) => (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)))
-      .catch(() => response.statusText);
+    const data = await response.json().catch(() => null);
+    // 400·404·409 + 문장 안내는 백엔드가 담당자에게 보여주려고 쓴 문구다 → 그대로 보여준다 (NFR-08)
+    if (response.status < 500 && typeof data?.detail === "string") throw new ApiError(data.detail);
+    const detail = data?.detail !== undefined ? JSON.stringify(data.detail) : response.statusText;
     throw new ApiError(`요청 실패 (${response.status}): ${detail}`);
   }
   return (await response.json()) as T;
