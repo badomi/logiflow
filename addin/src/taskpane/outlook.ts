@@ -189,7 +189,11 @@ function renderSentState(mail: MailSnapshot): boolean {
   sentCaseId = caseId!;
   // 보낸 메일은 새 케이스 대상이 아니다. 이미 케이스에 등록된 메일이면 그 안내는 그대로 둔다
   showCreateButton(false);
-  if (!currentCaseId) setText("case-state", "");
+  // 케이스 등록 안내가 없으면 빈 카드가 남으므로 카드째 숨긴다
+  if (!currentCaseId) {
+    setText("case-state", "");
+    document.getElementById("case-section")!.hidden = true;
+  }
   document.getElementById("record-sent")!.hidden = !toMe;
   setText(
     "sent-state",
@@ -307,6 +311,7 @@ function resetCaseArea() {
   document.getElementById("files-section")!.hidden = true;
   document.getElementById("extraction")!.hidden = true;
   setText("case-state", "");
+  document.getElementById("case-section")!.hidden = false;
   showCreateButton(false);
   document.getElementById("draft-section")!.hidden = true;
   document.getElementById("reply-section")!.hidden = true;
