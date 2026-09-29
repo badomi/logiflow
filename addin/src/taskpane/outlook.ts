@@ -218,6 +218,9 @@ async function onRecordSent(auto = false) {
     const sent = sentEvents.find((e) => e.detail?.messageId === mail.internetMessageId) ?? sentEvents[0];
     const sentAt = sent?.detail?.sentAt ?? fallback;
     const who = sent?.actor ?? currentUserEmail();
+    // 보낸 메일의 Outlook 생성 시각은 초안을 만든 시각이라, 실제 발송 시각(원문 Date 헤더)으로 바꿔 보여준다
+    setText("received-at-label", "발송 시각");
+    setText("received-at", new Date(sentAt).toLocaleString("ko-KR"));
     setText("sent-state", `${sentCaseId} 발송 이력: ${new Date(sentAt).toLocaleString("ko-KR")} · ${who}`);
     setStatus(`${sentCaseId} 발송 이력을 ${auto ? "자동으로 " : ""}기록했습니다 (발송 시각 ${new Date(sentAt).toLocaleString("ko-KR")}).`, "success");
     // LEONA가 보낸 메일 자체는 회신이 아니므로 병합 안내를 숨긴다 (서버도 병합을 거부한다)
@@ -289,6 +292,7 @@ async function openDraft(load: () => Promise<Draft>, open: (draft: Draft) => voi
 function renderMail(mail: MailSnapshot) {
   setText("subject", mail.subject || "(제목 없음)");
   setText("from", mail.from.name ? `${mail.from.name} <${mail.from.email}>` : mail.from.email);
+  setText("received-at-label", "수신 시각");
   setText("received-at", mail.receivedAt ? new Date(mail.receivedAt).toLocaleString("ko-KR") : "-");
   setText("body-preview", toPreview(mail.bodyText));
   setText("conversation-id", mail.conversationId || "-");
