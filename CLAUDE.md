@@ -54,7 +54,7 @@ A트랙은 MUST-SHIP 4개 모두의 **입구(메일 꺼내기·케이스 생성)
 3. **회신 식별·병합** (MUST-SHIP ③) — 제목 케이스 ID / 헤더(In-Reply-To, References) / conversationId로 대상 제시 → 담당자 확인 → 병합 → 재추출·재검증 트리거 (FR-104, FR-207)
 4. 여유 시 S등급: 중복 수신 방지(FR-105, internetMessageId 기준) 등
 - 마무리: 설치·실행 절차서(NFR-07) 중 애드인 설치 부분 작성
-- DB 담당은 B트랙. A는 저장 인터페이스만 합의해 사용.
+- DB 담당은 팀 미확정(결정 사항 2-1). A는 저장 인터페이스를 맞춰 사용.
 
 ## 기술 메모
 - 프로젝트 생성: `npm install -g yo generator-office` → `yo office` → Office Add-in Task Pane / TypeScript / Outlook / **XML manifest(add-in only)** 권장(개인 계정 호환성).
