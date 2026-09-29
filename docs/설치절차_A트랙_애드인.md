@@ -35,16 +35,17 @@ Outlook 웹 ──(패널 화면)── https://localhost:3000   애드인 개�
 
 ## 2. 소스 받기와 의존성 설치 (최초 1회)
 
-1. 팀 저장소를 `C:\dev\leona-addin`에 받는다.
-   - GitHub Desktop: **File → Clone repository** → 팀 비공개 저장소 선택 → Local path `C:\dev\leona-addin`
-   - 또는 전달받은 zip을 `C:\dev\leona-addin`에 압축 해제
+1. 팀 비공개 저장소 `https://github.com/badomi/logiflow` 를 `C:\dev\logiflow`에 받는다 (저장소 초대를 먼저 받아야 보인다).
+   - GitHub Desktop: **File → Clone repository** → `badomi/logiflow` 선택 → Local path `C:\dev\logiflow`
+   - 또는 명령: `git clone https://github.com/badomi/logiflow.git C:\dev\logiflow`
+   - 다른 폴더에 받아도 된다. 아래 명령의 `C:\dev\logiflow`만 그 폴더로 바꾼다.
 2. 의존성을 설치한다.
 
 ```powershell
-cd C:\dev\leona-addin\addin
+cd C:\dev\logiflow\addin
 npm install
 
-cd C:\dev\leona-addin\server
+cd C:\dev\logiflow\server
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
 copy .env.example .env      # 기본값(SQLite)이면 수정 없이 사용
@@ -55,7 +56,7 @@ copy .env.example .env      # 기본값(SQLite)이면 수정 없이 사용
 ## 3. 개발용 HTTPS 인증서 신뢰 (최초 1회, 직접 클릭 필요)
 
 ```powershell
-cd C:\dev\leona-addin\addin
+cd C:\dev\logiflow\addin
 npx office-addin-dev-certs install
 ```
 
@@ -71,13 +72,13 @@ Windows **"보안 경고 — 인증서를 설치하시겠습니까?"** 창이 �
 
 ```powershell
 # 터미널 1 — 백엔드 API
-cd C:\dev\leona-addin\server
+cd C:\dev\logiflow\server
 .\.venv\Scripts\python -m uvicorn app.main:app --port 8000 --reload
 ```
 
 ```powershell
 # 터미널 2 — 애드인 개발 서버
-cd C:\dev\leona-addin\addin
+cd C:\dev\logiflow\addin
 npm run dev-server
 ```
 
@@ -94,7 +95,7 @@ API 문서(자동 생성, 직접 호출해 볼 수 있음): `http://localhost:80
 2. 주소창에 **`https://outlook.cloud.microsoft/mail/inclientstore`** 입력 → "Outlook용 추가 기능" 창이 열린다.
    (새 "앱" 스토어 화면에는 파일 업로드 버튼이 없어서 이 주소를 쓴다)
 3. 왼쪽 **[내 추가 기능]** → 맨 아래 **"추가 기능 사용자 지정"** → **[+ 사용자 지정 추가 기능 추가 ∨] → [파일에서 추가…]**
-4. `C:\dev\leona-addin\addin\manifest.xml` 선택 → 경고 창에서 **[설치]**
+4. `C:\dev\logiflow\addin\manifest.xml` 선택 → 경고 창에서 **[설치]**
 5. 창을 닫고 **F5**(새로고침)
 
 ### 매니페스트를 바꾼 뒤 다시 설치하는 법
@@ -160,7 +161,7 @@ API 문서(자동 생성, 직접 호출해 볼 수 있음): `http://localhost:80
 ## 9. 테스트 실행
 
 ```powershell
-cd C:\dev\leona-addin\server
+cd C:\dev\logiflow\server
 .\.venv\Scripts\python -m pytest -q          # 백엔드 수용 기준 테스트 (37건)
 .\.venv\Scripts\python -m app.eml_reader samples\eml   # .eml → 메일 표준 JSON 출력
 ```
