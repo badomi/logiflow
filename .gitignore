@@ -41,3 +41,6 @@ server/data/
 server/storage/
 server/out/
 *.db
+
+# 정밀도 측정 보고서 (각자 PC에서 생성)
+server/eval/reports/

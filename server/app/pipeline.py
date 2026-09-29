@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 TIME_LIMIT_MS = 60_000
 
 # 추출이 도는 동안의 상태 (6장 caseStatus 값)
-RUNNING_STATUS = {"CASE_CREATED": "파싱중", "REPLY_MERGED": "재파싱"}
+RUNNING_STATUS = {"CASE_CREATED": "파싱중", "REPLY_MERGED": "재파싱", "MANUAL_RERUN": "재파싱", "FIELD_CORRECTED": "재파싱"}
 
 
 class Extractor(Protocol):
@@ -71,7 +71,7 @@ class Job:
     """백그라운드에서 실행할 추출 작업 한 건"""
 
     case_pk: int
-    trigger: str  # CASE_CREATED / REPLY_MERGED
+    trigger: str  # CASE_CREATED / REPLY_MERGED / MANUAL_RERUN(다시 추출) / FIELD_CORRECTED(수동 보정)
     actor: str | None
     previous_status: str
 

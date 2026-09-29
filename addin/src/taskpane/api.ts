@@ -123,6 +123,11 @@ export interface Draft {
   attachments: { filename: string; url: string; size: number }[];
 }
 
+/** [다시 추출] NFR-03 — 추출→검증을 다시 실행한다. 담당자가 고친 필드는 유지된다 */
+export function rerunExtraction(caseId: string, actor: string) {
+  return request<CaseDetail>("POST", `/cases/${encodeURIComponent(caseId)}/extract`, { actor });
+}
+
 /** [보완 요청 초안] FR-304·305 — 초안 내용만 받는다. 발송 기능은 없다 */
 export function supplementDraft(caseId: string, questions: string[], actor: string) {
   return request<Draft>("POST", `/cases/${encodeURIComponent(caseId)}/drafts/supplement`, { questions, actor });

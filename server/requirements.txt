@@ -4,6 +4,9 @@ uvicorn[standard]==0.54.0   # BSD-3   API 서버 실행기
 sqlalchemy==2.1.1           # MIT     DB 연결 (SQLite ↔ Oracle 교체 가능)
 pydantic-settings==2.15.0   # MIT     .env 설정 읽기
 python-multipart==0.0.32    # Apache  파일 업로드(.eml) 처리
+openpyxl==3.1.5             # MIT     견적서 XLSX 양식 채우기, 첨부 XLSX 읽기
+pypdf==5.9.0                # BSD-3   첨부 PDF 텍스트 읽기 (FR-204)
+pillow==12.1.1              # HPND(MIT 계열) 양식의 로고 이미지를 저장 시 유지
 
 # Oracle 연결 시에만 설치: pip install oracledb   (Apache 2.0 / UPL)
 

@@ -34,9 +34,21 @@ def _original(case: Case):
 
 
 def _recipient(case: Case) -> list[Address]:
-    """받는 사람: 최초 요청 메일의 발신자(화주). FR-208(회신 주소 추출)이 연결되면 그 값을 우선한다."""
+    """받는 사람: B트랙이 서명·헤더에서 뽑은 회신 주소(FR-208)가 있으면 그것, 없으면 최초 요청 메일의 발신자."""
     original = _original(case)
+    qi = case.quote_input
+    if qi is not None and qi.contactEmail:
+        return [Address(name=qi.contactName or original.from_name or "", email=qi.contactEmail)]
     return [Address(name=original.from_name or "", email=original.from_email or "")]
+
+
+def validation_questions(case: Case) -> list[str]:
+    """가장 최근 검증(C트랙) 결과의 보완 문항 (FR-304). 검증이 안 돌았으면 빈 목록."""
+    for event in reversed(case.events):
+        if event.event_type == "PIPELINE_RUN":
+            validation = json.loads(event.detail or "{}").get("validation") or {}
+            return [q for q in validation.get("questions") or [] if q]
+    return []
 
 
 def _record(session: Session, case: Case, kind: str, actor: str | None, detail: dict) -> None:
@@ -54,11 +66,13 @@ def _record(session: Session, case: Case, kind: str, actor: str | None, detail: 
 def supplement_draft(session: Session, case: Case, questions: list[str], actor: str | None) -> DraftOut:
     """보완 요청 초안. 문항은 누락 항목 그대로 번호를 붙인다 — 임의로 더하거나 빼지 않는다 (FR-305)."""
     questions = [q.strip() for q in questions if q and q.strip()]
+    if not questions:  # 패널에서 문항을 비워 보냈으면 검증 결과 문항을 그대로 쓴다 (FR-305)
+        questions = validation_questions(case)
     if not questions:
         raise DraftError(
-            "입력한 보완 요청 문항이 없어 초안을 만들지 않았습니다. "
-            "'메일 초안' 칸에 화주에게 물어볼 항목을 한 줄에 하나씩 입력한 뒤 다시 누르세요. "
-            "(C트랙 누락 판정 연결 후에는 문항이 자동으로 채워집니다)"
+            "보완 요청할 문항이 없어 초안을 만들지 않았습니다. "
+            "검증 결과 빠진 항목이 없거나 아직 추출이 끝나지 않았습니다. "
+            "직접 물어볼 내용이 있으면 '보완 요청 문항' 칸에 한 줄에 하나씩 입력한 뒤 다시 누르세요."
         )
 
     subject = f"[{case.case_id}] 견적 보완 요청 / Request for additional information - {_original(case).subject or ''}".strip()
@@ -183,9 +197,9 @@ def quote_draft(session: Session, case: Case, actor: str | None) -> DraftOut:
     files = quote_files(case)
     if not files:
         raise DraftError(
-            "이 케이스에 등록된 견적서가 없어 송부 초안을 만들지 않았습니다. "
-            "견적서(PDF·XLSX)가 생성·등록된 뒤 다시 누르세요. "
-            f"(C트랙 견적서 생성 연결 전: http://localhost:8000/docs 의 POST /api/cases/{case.case_id}/quotes 로 등록)"
+            "이 케이스에는 아직 견적서가 없어 송부 초안을 만들지 않았습니다. "
+            "견적서는 필수 항목이 모두 확보되고 요율이 등록된 구간이면 자동으로 만들어집니다 "
+            "(케이스 상태 '계산완료'). 상태가 '정보부족'이면 먼저 보완 요청을, '보류'면 사유를 확인하세요."
         )
 
     subject = f"[{case.case_id}] 견적서 송부 / Quotation - {_original(case).subject or ''}".strip()

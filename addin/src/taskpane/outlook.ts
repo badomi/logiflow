@@ -13,6 +13,8 @@ import {
   quoteDraft,
   recordMailEvent,
   supplementDraft,
+  rerunExtraction,
+  fetchFileBase64,
 } from "./api";
 import type { Draft, ExtractionState, MailInput, ReplyCandidate } from "./api";
 import { currentUserEmail, readSelectedMail, readSelectedMailRaw } from "./mail";
@@ -334,6 +336,11 @@ async function onSupplementDraft() {
 async function onQuoteDraft() {
   if (!currentCaseId) return;
   const caseId = currentCaseId;
+  // Mailbox 1.15 이상(현재 Outlook 웹): 고객 메일에 대한 '회신'으로 열면서 견적서를 바로 첨부한다 → 버튼 한 번으로 끝
+  if (Office.context.requirements.isSetSupported("Mailbox", "1.15")) {
+    await openQuoteReplyWithAttachments(caseId);
+    return;
+  }
   await openDraft(
     () => quoteDraft(caseId, currentUserEmail()),
     (draft) => {
@@ -349,6 +356,40 @@ async function onQuoteDraft() {
 }
 
 /**
+ * 견적서 송부 (FR-505): 지금 열린 고객 메일에 대한 회신 창을 견적서 파일을 붙인 채로 연다.
+ * 새 메일 창은 공개 URL로만 첨부할 수 있지만(localhost 불가), 회신 창은 파일 내용(base64)을 직접 넘길 수 있다.
+ * 보내기는 담당자가 직접 누른다 (자동 발송 없음).
+ */
+async function openQuoteReplyWithAttachments(caseId: string) {
+  setBusy(true);
+  setStatus("견적서를 불러오는 중…", "info");
+  try {
+    const draft = await quoteDraft(caseId, currentUserEmail());
+    const attachments: Office.ReplyFormAttachment[] = [];
+    for (const file of draft.attachments) {
+      attachments.push({
+        type: Office.MailboxEnums.AttachmentType.Base64,
+        name: file.filename,
+        base64file: await fetchFileBase64(file.url),
+      });
+    }
+    // 작성 창에서 LEONA를 열면 제목에 케이스 번호를 넣고 초안함에 저장한다 (이미 붙은 견적서는 다시 붙이지 않음)
+    savePendingDraft({ caseId, kind: "QUOTE", subject: `RE: ${draft.subject}`, attachments: draft.attachments });
+    const item = Office.context.mailbox.item as Office.MessageRead;
+    await call<void>((done) => item.displayReplyFormAsync({ htmlBody: draft.htmlBody, attachments }, done));
+    setStatus(
+      `견적서 ${attachments.length}개를 첨부한 회신 창을 열었습니다. 첨부·내용을 확인하고 직접 보내기를 눌러 주세요. ` +
+        "(제목에 케이스 번호를 넣고 초안함에 저장하려면 그 창에서 [앱] → LEONA)",
+      "success"
+    );
+  } catch (error) {
+    setStatus(messageOf(error), "error");
+  } finally {
+    setBusy(false);
+  }
+}
+
+/**
  * 백엔드가 만든 초안 내용으로 Outlook 작성 창을 띄운다.
  * 작성 창이 열리면 이벤트 처리기(commands)가 제목·첨부를 마무리하고 초안함에 저장한다.
  * 보내기 버튼은 담당자가 직접 누른다 (자동 발송 없음).
@@ -357,8 +398,11 @@ async function openDraft(load: () => Promise<Draft>, open: (draft: Draft) => voi
   setBusy(true);
   setStatus("초안을 준비하는 중…", "info");
   try {
-    open(await load());
-    setStatus("작성 창을 열었습니다. 초안함에 저장되며, 내용을 확인한 뒤 직접 보내기를 눌러 주세요.", "success");
+    const draft = await load();
+    open(draft);
+    // 작성 창만 열어서는 첨부·초안함 저장이 되지 않는다 (Outlook 웹이 localhost 파일을 못 가져옴) → 한 단계 더 안내
+    const what = draft.attachments.length ? "견적서가 첨부되고 초안함에 저장됩니다" : "초안함에 저장됩니다";
+    setStatus(`새로 열린 메일 창에서 [앱] → LEONA를 열어야 ${what}. 그다음 내용을 확인하고 직접 보내기를 눌러 주세요.`, "info");
   } catch (error) {
     setStatus(messageOf(error), "error");
   } finally {
@@ -391,6 +435,9 @@ function resetCaseArea() {
   document.getElementById("draft-section")!.hidden = true;
   document.getElementById("reply-section")!.hidden = true;
   document.getElementById("reply-candidates")!.replaceChildren();
+  const questions = document.getElementById("questions") as HTMLTextAreaElement;
+  questions.value = ""; // 다른 메일로 넘어가면 이전 케이스 문항·'직접 고침' 표시를 지운다
+  delete questions.dataset.edited;
 }
 
 /** 등록 여부·회신 후보에 따라 [케이스 생성] / [병합] 버튼을 보여준다. */
@@ -472,27 +519,93 @@ function renderExtraction(extraction: ExtractionState, waitedMs: number) {
         ? "항목 추출이 오래 걸리고 있습니다. 잠시 뒤 패널을 다시 열어 확인해 주세요."
         : `항목 추출 중… (${Math.round(waitedMs / 1000)}초)`,
     done: `항목 추출 완료 (${seconds}초${limit})`,
-    "not-connected": `항목 추출: B트랙 추출기 연결 전이라 실행만 기록했습니다 (${seconds}초)`,
+    "not-connected": `항목 추출이 꺼져 있어 실행만 기록했습니다 (${seconds}초) — server\\.env의 EXTRACTION_MODE를 확인하세요`,
     failed: `항목 추출 실패: ${extraction.error ?? "알 수 없는 오류"} — 케이스와 원문은 저장되어 있습니다`,
   };
   setText("extraction-state", messages[extraction.state]);
+  const rerun = document.getElementById("rerun-extraction") as HTMLButtonElement;
+  rerun.hidden = extraction.state === "none" || extraction.state === "running";
+  rerun.onclick = () => onRerunExtraction();
 
-  // B트랙 결과: { 필드명: 값 } 또는 { 필드명: { value, evidence, score } } 형태를 그대로 보여준다
-  for (const [field, raw] of Object.entries(extraction.result ?? {})) {
-    const value = raw && typeof raw === "object" && "value" in raw ? (raw as { value: unknown }).value : raw;
-    const dt = document.createElement("dt");
-    dt.textContent = field;
-    const dd = document.createElement("dd");
-    dd.textContent = value == null ? "-" : String(value);
-    result.append(dt, dd);
+  const fields = extractedFields(extraction.result);
+  for (const [field, info] of Object.entries(fields)) {
+    if (info.value == null || info.status === "missing") continue;
+    addRow(result, field, info.status === "review" ? `${String(info.value)} (확인 필요)` : String(info.value), info.evidence);
   }
-  const missing = (extraction.validation as { missing?: unknown } | null)?.missing;
-  if (Array.isArray(missing) && missing.length) {
-    const dt = document.createElement("dt");
-    dt.textContent = "빠진 항목";
-    const dd = document.createElement("dd");
-    dd.textContent = missing.join(", ");
-    result.append(dt, dd);
+
+  const validation = (extraction.validation ?? {}) as ValidationView;
+  const hold = validation.hold ?? [];
+  if (hold.length) addRow(result, "보류 사유", hold.map((h) => h.message).join(" / "));
+  const questions = validation.questions ?? [];
+  if (questions.length) addRow(result, "보완 필요", `${questions.length}개 항목 — 아래 '보완 요청 문항'에 채워 두었습니다`);
+  if (validation.quote?.totals) {
+    const totals = Object.entries(validation.quote.totals).map(([ccy, v]) => `${ccy} ${v.toLocaleString()}`).join(" + ");
+    addRow(result, "견적서", `v${validation.quote.version} 생성 (${totals}) — [견적서 송부 초안]으로 보낼 수 있습니다`);
+  }
+  const llm = (extraction.result as { llm?: { used?: boolean; error?: string } } | null)?.llm;
+  if (llm?.error) addRow(result, "LLM", "사용 못 함 — 키워드 규칙 결과만 반영 (" + llm.error.slice(0, 60) + ")");
+
+  fillQuestions(questions);
+}
+
+interface FieldView {
+  value: unknown;
+  status?: "filled" | "review" | "missing";
+  evidence?: string | null;
+}
+
+interface ValidationView {
+  questions?: string[];
+  hold?: { code: string; message: string }[];
+  quote?: { version: number; totals: Record<string, number> } | null;
+}
+
+/** B트랙 결과 { fields: { 필드: {value, status, evidence} } } — 예전 형식 { 필드: 값 }도 받는다 */
+function extractedFields(result: Record<string, unknown> | null): Record<string, FieldView> {
+  if (!result) return {};
+  const source = (result.fields && typeof result.fields === "object" ? result.fields : result) as Record<string, unknown>;
+  const out: Record<string, FieldView> = {};
+  for (const [field, raw] of Object.entries(source)) {
+    out[field] = raw && typeof raw === "object" && "value" in raw ? (raw as FieldView) : { value: raw, status: "filled" };
+  }
+  return out;
+}
+
+function addRow(list: HTMLElement, label: string, text: string, title?: string | null) {
+  const dt = document.createElement("dt");
+  dt.textContent = label;
+  const dd = document.createElement("dd");
+  dd.textContent = text;
+  if (title) dd.title = `근거: ${title}`; // 마우스를 올리면 추출 근거 원문 (FR-202)
+  list.append(dt, dd);
+}
+
+/** [다시 추출] 설정을 바꾼 뒤나 LLM 시간 초과로 규칙 결과만 나왔을 때 추출→검증을 다시 돌린다 (NFR-03) */
+async function onRerunExtraction() {
+  if (!currentCaseId) return;
+  const caseId = currentCaseId;
+  setBusy(true);
+  try {
+    await rerunExtraction(caseId, currentUserEmail());
+    const questions = document.getElementById("questions") as HTMLTextAreaElement;
+    delete questions.dataset.edited; // 새 검증 결과 문항으로 다시 채운다
+    setStatus("다시 추출을 시작했습니다. 끝나면 결과가 바뀝니다.", "info");
+    await renderCaseFiles(caseId);
+  } catch (error) {
+    setStatus(messageOf(error), "error");
+  } finally {
+    setBusy(false);
+  }
+}
+
+/** 검증 결과 문항을 입력 칸에 채운다. 담당자가 직접 고친 뒤에는 덮어쓰지 않는다. */
+function fillQuestions(questions: string[]) {
+  const box = document.getElementById("questions") as HTMLTextAreaElement | null;
+  if (!box || box.dataset.edited === "1") return;
+  box.value = questions.join("\n");
+  if (!box.dataset.watch) {
+    box.dataset.watch = "1";
+    box.addEventListener("input", () => (box.dataset.edited = "1"));
   }
 }
 

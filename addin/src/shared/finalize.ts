@@ -48,6 +48,17 @@ export async function findPendingDraft(item: Office.MessageCompose): Promise<Pen
   };
 }
 
+/** 작성 중인 메일에 이미 붙어 있는 파일 이름들 (Mailbox 1.8+, 못 읽으면 빈 목록) */
+async function attachedNames(item: Office.MessageCompose): Promise<Set<string>> {
+  if (!Office.context.requirements.isSetSupported("Mailbox", "1.8")) return new Set();
+  try {
+    const list = await call<Office.AttachmentDetailsCompose[]>((done) => item.getAttachmentsAsync(done));
+    return new Set(list.map((a) => a.name));
+  } catch {
+    return new Set();
+  }
+}
+
 /** 제목·첨부를 채우고 초안함에 저장한 뒤 이력에 남긴다. 실패하면 예외를 던진다. */
 export async function finalizeDraft(
   item: Office.MessageCompose,
@@ -57,7 +68,9 @@ export async function finalizeDraft(
   onStep("제목에 케이스 ID를 넣는 중…");
   await call<void>((done) => item.subject.setAsync(pending.subject, done));
 
+  const already = await attachedNames(item);
   for (const file of pending.attachments) {
+    if (already.has(file.filename)) continue; // 회신 창을 열 때 이미 붙인 견적서 — 두 번 붙이지 않는다
     onStep(`첨부 중: ${file.filename}`);
     const base64 = await fetchFileBase64(file.url);
     await call<string>((done) => item.addFileAttachmentFromBase64Async(base64, file.filename, done));

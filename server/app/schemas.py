@@ -137,7 +137,7 @@ class DraftOut(CamelModel):
 
 
 class SupplementRequest(CamelModel):
-    questions: list[str]  # C트랙 검증 결과의 보완 문항 (연결 전에는 담당자 입력)
+    questions: list[str] = []  # 비우면 검증 결과 문항을 쓴다. 담당자가 고친 문항을 보내면 그것을 쓴다
     actor: str | None = None
 
 

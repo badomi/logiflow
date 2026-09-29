@@ -12,7 +12,8 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from . import drafts, pipeline, services
-from .db import get_session, init_db
+from .config import settings
+from .db import SessionLocal, get_session, init_db
 from .schemas import (
     ActorRequest,
     CaseDetail,
@@ -29,7 +30,22 @@ from .schemas import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    connect_pipeline()
     yield
+
+
+def connect_pipeline() -> None:
+    """컨테이너 마스터 등록(6장 containerType 제약) + LLM_ENABLED=true면 추출·검증·견적 연결."""
+    from .seed import seed_containers
+
+    with SessionLocal() as session:
+        seed_containers(session)
+        session.commit()
+    if settings.extraction_mode in ("rules", "hybrid"):
+        from .extraction import HybridExtractor
+        from .validation import RuleValidator
+
+        pipeline.register(extractor=HybridExtractor(llm_mode=settings.extraction_mode), validator=RuleValidator())
 
 
 app = FastAPI(title="LEONA 자동견적 — A트랙 API", version="0.1.0", lifespan=lifespan)
@@ -54,6 +70,14 @@ def _http_error(error: Exception) -> HTTPException:
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/api/health/detail")
+def health_detail(session: Session = Depends(get_session)) -> dict:
+    """설정 점검: 추출 모드·LLM 연결·모델 설치·요율·PDF 도구·.env — 문제가 있으면 warnings에 할 일을 적는다."""
+    from .diagnostics import collect
+
+    return collect(session)
 
 
 @app.post("/api/cases", response_model=CreateCaseResult)
@@ -205,3 +229,115 @@ def merge_reply(
     if job:
         background.add_task(pipeline.execute, job)
     return services.case_detail(case)
+
+
+# ---------------------------------------------------------------- B트랙: 추출 결과 조회·수동 보정 (FR-202·206)
+
+
+class FieldCorrection(ActorRequest):
+    value: str | int | float | None = None
+
+
+@app.get("/api/cases/{case_id}/fields")
+def get_fields(case_id: str, session: Session = Depends(get_session)) -> list[dict]:
+    """필드별 현재 값·근거 원문·점수·상태 (검토 필요 값은 candidate로)."""
+    from .extraction import field_view
+
+    try:
+        return field_view(session, services.get_case(session, case_id))
+    except services.NotFoundError as error:
+        raise _http_error(error) from error
+
+
+@app.post("/api/cases/{case_id}/fields/{field}", response_model=CaseDetail)
+def correct_field(case_id: str, field: str, body: FieldCorrection, background: BackgroundTasks,
+                  session: Session = Depends(get_session)):
+    """담당자가 필드 값을 고친다 → 수정 이력 저장 → 검증 다시 실행 (재추출이 이 값을 덮어쓰지 않음)."""
+    from .extraction import correct_field as correct
+    from .extraction.extractor import CorrectionError
+
+    try:
+        case = services.get_case(session, case_id)
+        correct(session, case, field, body.value, body.actor)
+        session.commit()
+    except (services.NotFoundError, CorrectionError) as error:
+        raise _http_error(error) from error
+    job = pipeline.start(session, case, trigger="FIELD_CORRECTED", actor=body.actor)
+    background.add_task(pipeline.execute, job)
+    return services.case_detail(case)
+
+
+RERUN_STUCK_AFTER_S = 120  # 이 시간이 지나도 '추출 중'이면 서버가 도중에 꺼진 것으로 보고 다시 실행을 허용
+
+
+@app.post("/api/cases/{case_id}/extract", response_model=CaseDetail)
+def rerun_extraction(case_id: str, body: ActorRequest, background: BackgroundTasks,
+                     session: Session = Depends(get_session)):
+    """[다시 추출] 추출→검증을 다시 실행한다 (NFR-03 재실행). 설정 변경 뒤·LLM 시간 초과 뒤에 쓴다.
+
+    담당자가 고친 필드(FR-206)는 다시 추출해도 유지된다.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        case = services.get_case(session, case_id)
+    except services.NotFoundError as error:
+        raise _http_error(error) from error
+    state = services.extraction_state(case)
+    if state.state == "running" and state.started_at is not None:
+        started = state.started_at if state.started_at.tzinfo else state.started_at.replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc) - started).total_seconds() < RERUN_STUCK_AFTER_S:
+            raise HTTPException(status_code=409, detail="이미 추출 중입니다. 끝난 뒤 다시 눌러 주세요.")
+    job = pipeline.start(session, case, trigger="MANUAL_RERUN", actor=body.actor)
+    background.add_task(pipeline.execute, job)
+    return services.case_detail(case)
+
+
+# ---------------------------------------------------------------- 요율 엑셀 관리 (NFR-06)
+
+XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _xlsx_response(data: bytes, filename: str):
+    from urllib.parse import quote
+
+    from fastapi.responses import Response
+
+    return Response(data, media_type=XLSX_MEDIA,
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"})
+
+
+@app.get("/api/rates/template")
+def rates_template():
+    """빈 요율 양식 (작성 안내 시트 포함)"""
+    from . import rates
+
+    return _xlsx_response(rates.template(), "요율_양식.xlsx")
+
+
+@app.get("/api/rates/export")
+def rates_export(session: Session = Depends(get_session)):
+    """지금 DB에 있는 요율 — 고쳐서 그대로 다시 올리면 된다"""
+    from . import rates
+
+    return _xlsx_response(rates.export(session), "현재_요율.xlsx")
+
+
+@app.get("/api/rates/summary")
+def rates_summary(session: Session = Depends(get_session)) -> list[dict]:
+    """출처별 요율 개수·적용 기간·만료 여부"""
+    from . import rates
+
+    return rates.summary(session)
+
+
+@app.post("/api/rates/import")
+async def rates_import(file: UploadFile, session: Session = Depends(get_session)) -> dict:
+    """요율 엑셀 올리기. 틀린 줄이 하나라도 있으면 아무것도 바꾸지 않고 400 + 틀린 곳 목록."""
+    from . import rates
+
+    try:
+        return rates.import_workbook(session, await file.read())
+    except rates.RateImportError as error:
+        raise HTTPException(status_code=400, detail={"message": str(error), "errors": error.errors}) from error
+

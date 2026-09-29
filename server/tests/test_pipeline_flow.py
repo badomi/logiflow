@@ -1,0 +1,402 @@
+"""케이스 생성 → 추출(B) → 검증(C) → 보완 요청 / 회신 병합 → 견적서 흐름 테스트.
+
+룰 모드는 실제 샘플 메일로 돌린다. 하이브리드 모드는 FakeLlm(가짜 LLM 응답)으로 결합·환각 차단 규칙을 확인한다.
+실제 LLM 품질은 eval/run_eval.py로 따로 잰다 (NFR-01).
+"""
+
+import base64
+import uuid
+from datetime import date
+
+import pytest
+from openpyxl import load_workbook
+
+from app import pipeline, validation
+from app.config import settings
+from app.db import SessionLocal
+from app.extraction import HybridExtractor
+from app.seed import seed_containers, seed_sample_rates
+from app.validation import RuleValidator
+
+from .conftest import sample
+
+TODAY = date(2026, 9, 29)
+REST_OF_LCL = "요청하신 정보 회신드립니다.\n선적항: 인천항\n조건: CIF\n결제조건: T/T 30% Advance\n전체 부피: 0.38CBM\n감사합니다."
+
+
+@pytest.fixture
+def connect(monkeypatch):
+    monkeypatch.setattr(validation, "today_kst", lambda: TODAY)
+    monkeypatch.setattr(settings, "quote_pdf", False)  # PDF는 LibreOffice 있는 PC에서만 → 전용 테스트에서 확인
+    with SessionLocal() as s:
+        seed_containers(s)
+        seed_sample_rates(s)
+        s.commit()
+
+    def _connect(llm=None, mode="rules"):
+        pipeline.register(extractor=HybridExtractor(llm=llm, llm_mode=mode), validator=RuleValidator())
+
+    _connect()
+    yield _connect
+    pipeline.register(extractor=pipeline._NotConnected(), validator=pipeline._NotConnected())
+
+
+def eml(name: str) -> dict:
+    return {"emlBase64": base64.b64encode(sample(name)).decode(), "actor": "quote@leona.example.com"}
+
+
+def text_mail(body: str, subject="견적 요청", sender="buyer@abc-trading.example.com") -> dict:
+    return {"snapshot": {"subject": subject, "from": {"name": "", "email": sender}, "bodyText": body,
+                         "internetMessageId": f"<{uuid.uuid4()}@test>"}, "actor": "quote@leona.example.com"}
+
+
+def create(client, body: dict) -> dict:
+    case_id = client.post("/api/cases", json=body).json()["case"]["caseId"]
+    return client.get(f"/api/cases/{case_id}").json()
+
+
+def reply(client, case_id: str, body: dict) -> dict:
+    client.post(f"/api/cases/{case_id}/replies", json=body)
+    return client.get(f"/api/cases/{case_id}").json()
+
+
+FULL_LCL = (
+    "품목: 스프링노트\n박스 수량: 10박스\n박스 1개 규격: 310 × 450 × 270mm\n전체 부피: 0.38CBM\n예상 총중량: 500kg\n"
+    "선적항: 인천\n도착항: 시드니\n화물 준비일: 2026-10-20\n조건: CIF\n선적방식: LCL\n인보이스 금액: USD 3,000\n"
+    "결제조건: T/T 30% Advance\n감사합니다."
+)
+
+
+# ------------------------------------------------------------------ MUST-SHIP ①②③④ (룰 모드, 실제 샘플)
+
+
+def test_lcl_request_becomes_supplement_questions(client, connect):
+    case = create(client, eml("01_lcl_request.eml"))
+    assert case["status"] == "정보부족"
+    questions = "\n".join(case["extraction"]["validation"]["questions"])
+    for expected in ("선적항", "화물 준비일", "FOB / CIF", "0.38CBM", "결제 조건"):
+        assert expected in questions
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    assert fields["pol"]["value"] is None  # 픽업지 '인천'을 선적항으로 쓰지 않는다
+    assert fields["commodity"]["evidence"] == "품목: 스프링노트(일반 문구류)"  # FR-202 근거 원문
+    assert fields["boxL"]["value"] == 310 and fields["grossWeightKg"]["score"] == 1.0
+
+
+def test_reply_merge_then_quote(client, connect):
+    case_id = create(client, eml("01_lcl_request.eml"))["caseId"]
+    case = reply(client, case_id, eml("03_lcl_reply.eml"))  # 준비일·인보이스 금액 보충
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case_id}/fields").json()}
+    assert fields["cargoReadyDate"]["value"] == "2026-10-20" and fields["ccy"]["value"] == "USD"
+    assert fields["cargoReadyDate"]["origin"] == "메일 2 · 회신 본문"
+    assert case["status"] == "정보부족"  # 선적항·조건·결제조건은 아직
+
+    case = reply(client, case_id, text_mail(REST_OF_LCL, subject=f"RE: [{case_id}] 견적 보완"))
+    assert case["status"] == "계산완료", case["extraction"]["validation"]
+    assert case["extraction"]["validation"]["quote"]["totals"] == {"USD": 500.0, "KRW": 140203.0}
+    draft = client.post(f"/api/cases/{case_id}/drafts/quote", json={}).json()
+    assert [a["filename"] for a in draft["attachments"]] == [f"{case_id}_견적서.xlsx"]
+
+
+def test_quote_xlsx_follows_template(client, connect):
+    case_id = create(client, text_mail(FULL_LCL))["caseId"]
+    ws = load_workbook(settings.storage_dir / case_id / "quotes" / f"{case_id}_견적서.xlsx").active
+    assert case_id in ws["B12"].value and ws["C17"].value == ": INCHEON - SYDNEY" and ws["C20"].value == ": CIF"
+    assert ws["C35"].value == "USD500.00 + KRW140,203" and len(ws._images) == 1
+    # 예시 견적서 형식: 한 페이지 맞춤(F열 주소·DATE·REMARK 포함), R/T 기준, 쓰지 않은 줄 숨김, 한글 유효기간
+    assert ws.sheet_properties.pageSetUpPr.fitToPage and ws.page_setup.fitToWidth == 1
+    assert ws["F2"].value == "LEONA SEA & AIR CO., LTD." and ws["F21"].value.startswith("DATE : 20")
+    assert ws["D22"].value == "R/T" and ws["C19"].value.endswith("(1 R/T 기준)")
+    assert ws["B29"].value == "CUSTOMS CLEARANCE FEE" and ws["F29"].value == "INV.V x 1/1,000 (MIN 기준)"
+    assert ws.row_dimensions[31].hidden and not ws.row_dimensions[30].hidden
+    assert any(ws[f"B{r}"].value.startswith("* VALIDITY : 2026년") for r in range(39, 45) if ws[f"B{r}"].value)
+
+
+def test_multi_item_sample_is_held_without_mixed_values(client, connect):
+    case = create(client, eml("02_fob_multi_item.eml"))
+    assert case["status"] == "보류"
+    assert {h["code"] for h in case["extraction"]["validation"]["hold"]} >= {"MULTIPLE_ITEMS"}
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    assert fields["qty"]["value"] is None and fields["containerType"]["value"] is None  # 품목 값 섞임 방지
+    assert fields["contactEmail"]["value"] == "shipper@example.com"
+
+
+def test_no_rate_and_dangerous_goods(client, connect):
+    no_rate = create(client, text_mail(FULL_LCL.replace("시드니", "뉴욕")))
+    assert no_rate["status"] == "보류" and no_rate["extraction"]["validation"]["hold"][0]["code"] == "NO_RATE"
+    dg = create(client, text_mail(FULL_LCL.replace("스프링노트", "리튬 배터리")))
+    assert dg["status"] == "보류" and dg["extraction"]["validation"]["hold"][0]["code"] == "DANGEROUS_GOODS"
+
+
+# ------------------------------------------------------------------ 하이브리드 (가짜 LLM)
+
+
+class FakeLlm:
+    def __init__(self, fields: dict, multi=False):
+        self.fields, self.multi, self.calls = fields, multi, 0
+
+    def complete_json(self, system, user, schema):
+        self.calls += 1
+        return {"fields": self.fields, "multipleItems": self.multi}
+
+
+def test_llm_fills_prose_mail_rules_miss(client, connect):
+    prose = ("안녕하세요. 인천에서 시드니로 LCL 견적 부탁드립니다. 스프링노트 10박스이고 한 박스가 310 × 450 × 270mm, "
+             "전부 합쳐 0.38CBM에 500kg 정도입니다. 2026년 10월 20일에 준비되며 CIF 조건, 인보이스 금액은 USD 3,000, "
+             "결제는 T/T 30% Advance 입니다.\n감사합니다.")
+    llm = FakeLlm({
+        "commodity": {"value": "스프링노트", "quote": "스프링노트 10박스이고"},
+        "quantity": {"value": "10박스", "quote": "스프링노트 10박스이고"},
+        "portOfLoading": {"value": "인천", "quote": "인천에서 시드니로 LCL 견적 부탁드립니다."},
+        "portOfDischarge": {"value": "시드니", "quote": "인천에서 시드니로 LCL 견적 부탁드립니다."},
+        "grossWeight": {"value": "500kg", "quote": "전부 합쳐 0.38CBM에 500kg 정도입니다."},
+        "totalVolume": {"value": "0.38CBM", "quote": "전부 합쳐 0.38CBM에 500kg 정도입니다."},
+        "cargoReadyDate": {"value": "2026년 10월 20일", "quote": "2026년 10월 20일에 준비되며 CIF 조건"},
+        "incoterms": {"value": "CIF", "quote": "2026년 10월 20일에 준비되며 CIF 조건"},
+        "invoiceValue": {"value": "USD 3,000", "quote": "인보이스 금액은 USD 3,000"},
+        "paymentTerm": {"value": "T/T 30% Advance", "quote": "결제는 T/T 30% Advance 입니다."},
+    })
+    connect(llm, mode="hybrid")
+    case = create(client, text_mail(prose))
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    assert llm.calls == 1
+    assert fields["pol"]["value"] == "KRINC" and fields["pol"]["method"] == "llm"
+    assert fields["containerType"]["method"] == "rule+llm" or fields["containerType"]["value"] == "LCL"
+    assert case["status"] == "계산완료"
+
+
+def test_hallucinated_llm_value_is_dropped(client, connect):
+    connect(FakeLlm({
+        "paymentTerm": {"value": "T/T 100%", "quote": "결제조건: T/T 100%"},  # 메일에 없는 문장
+        "commodity": {"value": "스프링노트", "quote": "품목: 스프링노트(일반 문구류)"},
+    }), mode="hybrid")
+    case = create(client, eml("01_lcl_request.eml"))
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    assert fields["paymentTerm"]["value"] is None  # 근거가 원문에 없어 버림 (FR-202 정밀도 우선)
+    asked = case["extraction"]["result"]["llm"]["asked"]
+    assert "paymentTerm" in asked and "commodity" not in asked  # 룰이 찾은 품목은 묻지 않는다 (속도)
+    assert fields["commodity"]["method"] == "rule"
+
+
+def test_rule_llm_conflict_goes_to_review(client, connect):
+    connect(FakeLlm({"grossWeight": {"value": "50kg", "quote": "예상 총중량: 최대 500kg"}}), mode="hybrid")
+    case = create(client, eml("01_lcl_request.eml"))
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    # 인용 문장 안에 '50'이 없으므로 LLM 값은 근거 검증에서 탈락 → 룰 값 유지
+    assert fields["grossWeightKg"]["value"] == 500.0
+
+
+def test_llm_down_falls_back_to_rules(client, connect):
+    class Down:
+        def complete_json(self, *a):
+            raise RuntimeError("LLM 서버(http://localhost:11434)에 연결하지 못했습니다")
+
+    connect(Down(), mode="hybrid")
+    case = create(client, eml("01_lcl_request.eml"))
+    assert case["status"] == "정보부족"  # 실패로 멈추지 않고 룰 결과로 진행 (NFR-03)
+    assert "연결하지 못했습니다" in case["extraction"]["result"]["llm"]["error"]
+
+
+# ------------------------------------------------------------------ FR-206 수동 보정
+
+
+def test_manual_correction_survives_reextraction(client, connect):
+    case_id = create(client, eml("01_lcl_request.eml"))["caseId"]
+    res = client.post(f"/api/cases/{case_id}/fields/pol", json={"value": "KRINC", "actor": "kim@leona"})
+    assert res.status_code == 200
+    reply(client, case_id, eml("03_lcl_reply.eml"))  # 재추출해도 담당자 값 유지
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case_id}/fields").json()}
+    assert fields["pol"]["value"] == "KRINC" and fields["pol"]["method"] == "manual"
+    events = [e["eventType"] for e in client.get(f"/api/cases/{case_id}").json()["events"]]
+    assert "FIELD_CORRECTED" in events
+    assert client.post(f"/api/cases/{case_id}/fields/qty", json={"value": "열개"}).status_code == 400
+    assert client.post(f"/api/cases/{case_id}/fields/unknown", json={"value": "x"}).status_code == 400
+
+
+# ------------------------------------------------------------------ A트랙 임시 부분 연결 (보완 문항·받는 사람)
+
+
+def test_supplement_draft_uses_validation_questions_when_empty(client, connect):
+    case = create(client, eml("01_lcl_request.eml"))
+    expected = case["extraction"]["validation"]["questions"]
+    draft = client.post(f"/api/cases/{case['caseId']}/drafts/supplement", json={"questions": []}).json()
+    assert draft["htmlBody"].count("<li>") == len(expected) > 0  # FR-305: 문항 = 검증 결과
+    edited = client.post(f"/api/cases/{case['caseId']}/drafts/supplement", json={"questions": ["직접 쓴 문항"]}).json()
+    assert edited["htmlBody"].count("<li>") == 1  # 담당자가 고친 문항이 있으면 그것을 쓴다
+
+
+def test_draft_recipient_uses_extracted_contact(client, connect):
+    body = "품목: 노트\n감사합니다.\n김민수 대리\n㈜한빛무역"
+    case = create(client, text_mail(body, sender="ms.kim@hanbit.example.com"))
+    draft = client.post(f"/api/cases/{case['caseId']}/drafts/supplement", json={}).json()
+    assert draft["to"] == [{"name": "김민수 대리", "email": "ms.kim@hanbit.example.com"}]  # FR-208
+
+
+def test_quote_draft_message_explains_status(client, connect):
+    case = create(client, eml("01_lcl_request.eml"))
+    res = client.post(f"/api/cases/{case['caseId']}/drafts/quote", json={})
+    assert res.status_code == 400 and "정보부족" in res.json()["detail"]
+
+
+# ------------------------------------------------------------------ NFR-03 다시 추출
+
+
+def test_rerun_revives_case_created_while_extraction_was_off(client, connect):
+    pipeline.register(extractor=pipeline._NotConnected(), validator=pipeline._NotConnected())  # 추출 꺼짐
+    case_id = create(client, eml("01_lcl_request.eml"))["caseId"]
+    assert client.get(f"/api/cases/{case_id}").json()["extraction"]["state"] == "not-connected"
+
+    connect()  # 추출 켬 (.env 수정 + 서버 재시작에 해당)
+    again = client.post("/api/cases", json=eml("01_lcl_request.eml")).json()
+    assert again["duplicate"] and again["case"]["extraction"]["state"] == "not-connected"  # 같은 메일 = 예전 케이스
+
+    res = client.post(f"/api/cases/{case_id}/extract", json={"actor": "kim@leona"})
+    assert res.status_code == 200
+    case = client.get(f"/api/cases/{case_id}").json()
+    assert case["extraction"]["state"] == "done" and case["status"] == "정보부족"
+    assert case["extraction"]["trigger"] == "MANUAL_RERUN"
+
+
+def test_rerun_keeps_manual_fields_and_blocks_double_click(client, connect, session):
+    case_id = create(client, eml("01_lcl_request.eml"))["caseId"]
+    client.post(f"/api/cases/{case_id}/fields/pol", json={"value": "KRINC"})
+    client.post(f"/api/cases/{case_id}/extract", json={})
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case_id}/fields").json()}
+    assert fields["pol"]["value"] == "KRINC" and fields["pol"]["method"] == "manual"
+
+    from app import services
+    pipeline.start(session, services.get_case(session, case_id), trigger="MANUAL_RERUN", actor=None)  # 실행 중 상태
+    assert client.post(f"/api/cases/{case_id}/extract", json={}).status_code == 409
+    assert client.post("/api/cases/LQ-2099-0101-999/extract", json={}).status_code == 404
+
+
+
+# ------------------------------------------------------------------ LLM에게 빈 칸만 묻기 (CPU 속도, NFR-02)
+
+
+def test_llm_not_called_when_rules_find_everything(client, connect):
+    llm = FakeLlm({})
+    connect(llm, mode="hybrid")
+    case = create(client, text_mail(FULL_LCL))
+    assert llm.calls == 0 and case["status"] == "계산완료"
+    assert case["extraction"]["result"]["llm"]["skipped"] == "규칙으로 모두 찾음"
+
+
+def test_reply_prose_correction_is_asked_again(client, connect):
+    """룰이 찾은 값이라도 회신이 그 항목을 문장으로 언급하면 LLM에게 다시 묻는다 (평가 세트 V06 유형)."""
+    llm = FakeLlm({"grossWeight": {"value": "650kg", "quote": "총중량은 650kg로 정정합니다."}})
+    connect(llm, mode="hybrid")
+    case_id = create(client, text_mail(FULL_LCL.replace("결제조건: T/T 30% Advance\n", "")))["caseId"]
+    reply(client, case_id, text_mail("총중량은 650kg로 정정합니다.\n결제조건: T/T 30% Advance", subject=f"RE: [{case_id}]"))
+    case = client.get(f"/api/cases/{case_id}").json()
+    assert "grossWeight" in case["extraction"]["result"]["llm"]["asked"]
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case_id}/fields").json()}
+    assert fields["grossWeightKg"]["value"] == 650.0 and "메일 2" in fields["grossWeightKg"]["origin"]
+
+
+# ------------------------------------------------------------------ 월간 운임표 테스트 요율 (samples.md 3번)
+
+FCL_SG = (
+    "품목: 플라스틱 부품\n수량: 500박스\n총 부피: 48CBM\n총중량: 10,000kg\n선적항: 부산\n도착항: 싱가포르\n"
+    "화물 준비일: 2026-11-05\n조건: CIF\n컨테이너: 40HQ 1대\n인보이스 금액: USD 15,000\n결제조건: T/T 30% Advance\n감사합니다."
+)
+
+
+def test_monthly_oft_cif_40hq_quote(client, connect):
+    case = create(client, text_mail(FCL_SG))
+    assert case["status"] == "계산완료", case["extraction"]["validation"]
+    # 해상운임 USD 750 (월간 운임표 40'HC 싱가포르) + 부산 40HQ 부대비용 410,000+10,220+8,000+70,000
+    assert case["extraction"]["validation"]["quote"]["totals"] == {"USD": 750.0, "KRW": 498220.0}
+    ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
+    assert ws["C17"].value == ": BUSAN - SINGAPORE" and ws["F23"].value == "PER CNTR · INCLUSIVE ISPS(DIRECT)"
+
+
+def test_monthly_oft_fob_has_no_ocean_freight(client, connect):
+    case = create(client, text_mail(FCL_SG.replace("조건: CIF", "조건: FOB")))
+    assert case["extraction"]["validation"]["quote"]["totals"] == {"KRW": 498220.0}  # FOB는 해상운임 매수인 부담
+    # FOB 예시 견적서 형식: POL만, REQUIRED CNTR, CONTAINER/Q/T/TOTAL, AT COST는 칸 합침
+    ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
+    assert (ws["B17"].value, ws["C17"].value) == ("** POL", ": BUSAN, KOREA")
+    assert (ws["B19"].value, ws["C19"].value) == ("** REQUIRED CNTR", ": 40HQ' X 1")
+    assert (ws["C22"].value, ws["D22"].value, ws["E22"].value) == ("CONTAINER", "Q/T", "TOTAL")
+    at_cost = [r for r in range(23, 35) if ws[f"C{r}"].value == "AT COST"]
+    assert at_cost and all(f"C{r}:E{r}" in {str(m) for m in ws.merged_cells.ranges} for r in at_cost)
+
+
+def test_quote_pdf_is_made_with_libreoffice(client, connect, monkeypatch):
+    from app import quotation
+
+    if quotation.find_soffice() is None:
+        pytest.skip("LibreOffice 없음 — 이 PC에서는 XLSX만 만든다")
+    monkeypatch.setattr(settings, "quote_pdf", True)
+    case = create(client, text_mail(FULL_LCL))
+    quote = case["extraction"]["validation"]["quote"]
+    pdf = settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.pdf"
+    assert quote["pdf"] and pdf.read_bytes()[:4] == b"%PDF"
+    draft = client.post(f"/api/cases/{case['caseId']}/drafts/quote", json={}).json()
+    assert sorted(a["filename"] for a in draft["attachments"]) == sorted([pdf.name, f"{case['caseId']}_견적서.xlsx"])
+
+
+def test_quote_without_libreoffice_still_makes_xlsx(client, connect, monkeypatch):
+    from app import quotation
+
+    monkeypatch.setattr(settings, "quote_pdf", True)
+    monkeypatch.setattr(quotation, "find_soffice", lambda: None)
+    case = create(client, text_mail(FULL_LCL))
+    quote = case["extraction"]["validation"]["quote"]
+    assert quote["pdf"] is None and "LibreOffice" in quote["pdfNote"] and case["status"] == "계산완료"
+
+
+@pytest.mark.parametrize("container,reason", [
+    ("20FT GP", "국내 부대비용"),  # 해상운임은 있지만 20ft 부대비용 자료 없음 → 불완전 견적 금지
+    ("40' REEFER", "국내 부대비용"),
+])
+def test_container_without_local_charges_is_held(client, connect, container, reason):
+    case = create(client, text_mail(FCL_SG.replace("40HQ 1대", container).replace("48CBM", "25CBM")
+                                    .replace("10,000kg", "8,000kg")))
+    hold = case["extraction"]["validation"]["hold"]
+    assert case["status"] == "보류" and reason in hold[0]["message"]
+
+
+def test_reefer_not_served_port_is_held(client, connect):
+    body = FCL_SG.replace("40HQ 1대", "40RF 1대").replace("싱가포르", "제벨알리")  # 표에서 '-' (취급 안 함)
+    case = create(client, text_mail(body))
+    assert case["status"] == "보류" and "요율" in case["extraction"]["validation"]["hold"][0]["message"]
+
+
+# ------------------------------------------------------------------ 컨테이너 대수 (금액이 대수만큼 늘어야 한다)
+
+
+def test_stated_container_count_multiplies_per_container_charges(client, connect):
+    case = create(client, text_mail(FCL_SG.replace("40HQ 1대", "40HQ 2대").replace("48CBM", "96CBM")))
+    quote = case["extraction"]["validation"]["quote"]
+    # 해상운임 750×2, THC 410,000×2 + WFG 10,220×2 + 씰 8,000×2 + 서류비 70,000×1(B/L당)
+    assert quote["totals"] == {"USD": 1500.0, "KRW": 926440.0} and quote["containerCount"] == 2
+    ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
+    assert ws["C18"].value.endswith("(40HQ X 2)")
+
+
+def test_missing_count_is_estimated_from_volume_and_explained(client, connect):
+    body = FCL_SG.replace("컨테이너: 40HQ 1대", "컨테이너: 40HQ").replace("48CBM", "100CBM").replace("10,000kg", "20,000kg")
+    case = create(client, text_mail(body))
+    quote = case["extraction"]["validation"]["quote"]
+    assert quote["containerCount"] == 2 and "100CBM" in quote["containerCountNote"]  # 76CBM×0.88 넘음 → 2대
+    ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
+    assert any("40HQ 2대로 산정" in (ws[f"B{r}"].value or "") for r in range(39, 48))
+
+
+@pytest.mark.parametrize("stated,asked", [("1대", True), ("2대", False)])
+def test_over_weight_uses_weight_per_container(client, connect, stated, asked):
+    body = FCL_SG.replace("40HQ 1대", f"40HQ {stated}").replace("10,000kg", "28,000kg")
+    case = create(client, text_mail(body))
+    codes = {i["code"] for i in case["extraction"]["validation"]["issues"]}
+    assert ("OVER_WEIGHT" in codes) is asked
+
+
+def test_validation_rules_are_data(client, connect, monkeypatch):
+    """질문 문구·필수 항목을 데이터 파일로 바꾸면 코드 수정 없이 반영된다 (NFR-06)."""
+    custom = dict(validation.rules())
+    custom["questions"] = {**custom["questions"], "cargoReadyDate": "출고 예정일을 알려주세요 (테스트 문구)"}
+    custom["required"] = [f for f in custom["required"] if f != "paymentTerm"]
+    monkeypatch.setattr(validation, "rules", lambda: custom)
+    questions = "\n".join(create(client, eml("01_lcl_request.eml"))["extraction"]["validation"]["questions"])
+    assert "출고 예정일을 알려주세요 (테스트 문구)" in questions and "결제 조건" not in questions

@@ -129,6 +129,12 @@ body {
   margin: 0;
 }
 
+.extraction__rerun {
+  margin-top: 8px;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
 .fields--compact dt {
   margin-top: 6px;
   font-size: 11px;
