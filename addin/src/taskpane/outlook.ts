@@ -59,7 +59,7 @@ Office.onReady((info) => {
     const select = document.getElementById("case-select") as HTMLSelectElement;
     if (select.value) onMerge(select.value);
   };
-  document.getElementById("record-sent")!.onclick = onRecordSent;
+  document.getElementById("record-sent")!.onclick = () => onRecordSent(false);
   document.getElementById("supplement-draft")!.onclick = onSupplementDraft;
   document.getElementById("quote-draft")!.onclick = onQuoteDraft;
 
@@ -122,8 +122,9 @@ async function loadCurrentItem() {
     const match = await matchReply(current);
     if (token !== loadToken) return;
     renderCaseState(match.alreadyRegisteredCaseId, match.candidates);
-    renderSentState(snapshot);
+    const autoRecord = renderSentState(snapshot);
     setStatus("", "info");
+    if (autoRecord) await onRecordSent(true);
   } catch (error) {
     if (token !== loadToken) return;
     setStatus(messageOf(error), "error");
@@ -171,24 +172,35 @@ async function onMerge(caseId: string) {
 }
 
 /**
- * 담당자 본인이 보낸 [케이스ID] 메일이면 [발송 기록] 버튼을 보여준다 (FR-505).
- * 보내기 이벤트(OnMessageSend)가 동작하지 않는 환경을 위한 보조 경로다. 기록은 메일의 실제 발송 시각으로 남는다.
+ * 담당자 본인이 보낸 [케이스ID] 메일이면 발송 이력을 남긴다 (FR-505).
+ * 보내기 이벤트(OnMessageSend)가 동작하지 않는 환경을 위한 경로다. 기록은 메일의 실제 발송 시각으로 남는다.
+ * 돌려주는 값: true면 메일을 열자마자 자동 기록한다 (같은 메일은 서버가 한 번만 기록).
+ * 받는 사람에 본인이 있으면(계정 1개로 화주·담당자를 함께 테스트) 화주 회신과 구분할 수 없어 [발송 기록] 버튼으로 남긴다.
  */
-function renderSentState(mail: MailSnapshot) {
+function renderSentState(mail: MailSnapshot): boolean {
+  const me = currentUserEmail().toLowerCase();
   const caseId = mail.subject.match(CASE_ID_PATTERN)?.[0];
-  const mine = mail.from.email.toLowerCase() === currentUserEmail().toLowerCase();
+  const mine = mail.from.email.toLowerCase() === me;
   const section = document.getElementById("sent-section")!;
   section.hidden = !(caseId && mine);
-  if (!section.hidden) {
-    setText("sent-state", `담당자가 보낸 ${caseId} 케이스 메일입니다. 발송 이력에 남기려면 누르세요.`);
-    sentCaseId = caseId!;
-    // 보낸 메일은 새 케이스 대상이 아니다. 이미 케이스에 등록된 메일이면 그 안내는 그대로 둔다
-    showCreateButton(false);
-    if (!currentCaseId) setText("case-state", "");
-  }
+  if (section.hidden) return false;
+
+  const toMe = [...mail.to, ...mail.cc].some((a) => a.email.toLowerCase() === me);
+  sentCaseId = caseId!;
+  // 보낸 메일은 새 케이스 대상이 아니다. 이미 케이스에 등록된 메일이면 그 안내는 그대로 둔다
+  showCreateButton(false);
+  if (!currentCaseId) setText("case-state", "");
+  document.getElementById("record-sent")!.hidden = !toMe;
+  setText(
+    "sent-state",
+    toMe
+      ? `담당자가 보낸 ${caseId} 케이스 메일입니다. 받는 사람에 본인이 있어 화주 회신과 구분할 수 없으므로, 보낸 메일이 맞으면 누르세요.`
+      : `담당자가 보낸 ${caseId} 케이스 메일입니다. 발송 이력을 기록하는 중…`
+  );
+  return !toMe;
 }
 
-async function onRecordSent() {
+async function onRecordSent(auto = false) {
   if (!current || !sentCaseId) return;
   const mail = current.snapshot;
   // 보낸 메일의 '생성 시각'은 초안을 처음 만든 시각이다. 실제 발송 시각은 원문 Date 헤더(백엔드가 읽음),
@@ -202,9 +214,14 @@ async function onRecordSent() {
       occurredAt: fallback,
       emlBase64: current.emlBase64,
     });
-    const sent = [...result.events].reverse().find((e) => e.eventType === "MAIL_SENT");
+    const sentEvents = [...result.events].reverse().filter((e) => e.eventType === "MAIL_SENT");
+    const sent = sentEvents.find((e) => e.detail?.messageId === mail.internetMessageId) ?? sentEvents[0];
     const sentAt = sent?.detail?.sentAt ?? fallback;
-    setStatus(`${sentCaseId} 발송 이력을 기록했습니다 (발송 시각 ${new Date(sentAt).toLocaleString("ko-KR")}).`, "success");
+    const who = sent?.actor ?? currentUserEmail();
+    setText("sent-state", `${sentCaseId} 발송 이력: ${new Date(sentAt).toLocaleString("ko-KR")} · ${who}`);
+    setStatus(`${sentCaseId} 발송 이력을 ${auto ? "자동으로 " : ""}기록했습니다 (발송 시각 ${new Date(sentAt).toLocaleString("ko-KR")}).`, "success");
+    // LEONA가 보낸 메일 자체는 회신이 아니므로 병합 안내를 숨긴다 (서버도 병합을 거부한다)
+    if (auto) document.getElementById("reply-section")!.hidden = true;
   } catch (error) {
     setStatus(messageOf(error), "error");
   } finally {
