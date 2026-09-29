@@ -134,6 +134,19 @@ def test_reply_matched_by_subject_case_id(client):
     }
 
 
+def test_compose_window_match_with_blank_fields(client):
+    """작성 창 패널은 수신 시각·Message-ID가 없어 빈 값으로 보낸다 — 제목 케이스 ID로 찾아야 한다 (FR-104)."""
+    case_id = client.post("/api/cases", json=eml_body("02_fob_multi_item.eml")).json()["case"]["caseId"]
+    snapshot = {
+        "subject": f"Re: [{case_id}] 견적 보완 요청", "from": {"name": "", "email": ""}, "to": [], "cc": [],
+        "receivedAt": "", "bodyText": "", "conversationId": "", "internetMessageId": "",
+        "inReplyTo": "", "references": [], "attachments": [],
+    }
+    response = client.post("/api/replies/match", json={"snapshot": snapshot, "emlBase64": None, "actor": "a"})
+    assert response.status_code == 200
+    assert response.json()["candidates"][0]["caseId"] == case_id
+
+
 def test_reply_matched_by_conversation(client):
     case_id = client.post(
         "/api/cases", json=eml_body("02_fob_multi_item.eml", conversationId="CONV-FOB")

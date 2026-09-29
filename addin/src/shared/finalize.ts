@@ -35,6 +35,9 @@ export async function findPendingDraft(item: Office.MessageCompose): Promise<Pen
   const draft = await pendingDraft(userEmail());
   if (!draft) return null;
   const current = await call<string>((done) => item.subject.getAsync(done));
+  // 다른 케이스 ID가 제목에 있는 작성 창(담당자가 직접 연 회신 등)에는 붙이지 않는다
+  const subjectCaseId = current.match(/LQ-\d{4}-\d{4}-\d{3}/)?.[0];
+  if (subjectCaseId && subjectCaseId !== draft.caseId) return null;
   const isReply = /^(re|회신)\s*:/i.test(current);
   return {
     caseId: draft.caseId,

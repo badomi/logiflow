@@ -1,6 +1,6 @@
 /* global document, Office */
 
-import { finalizeDraft, findPendingDraft } from "../shared/finalize";
+import { call, finalizeDraft, findPendingDraft } from "../shared/finalize";
 import { savePendingDraft } from "../shared/handoff";
 import {
   ApiError,
@@ -76,6 +76,73 @@ function isComposeMode(): boolean {
   return typeof item?.subject?.setAsync === "function";
 }
 
+/**
+ * [작성 창] 담당자가 Outlook [회신]으로 직접 연 작성 창.
+ * 제목의 케이스 ID·같은 대화로 케이스 메일인지 확인하고, 맞으면 [보완 요청으로 만들기]·[견적서 첨부해 송부로 만들기]를 보여준다.
+ * 담당자가 버튼을 눌러야만 메일을 바꾼다. 케이스와 관계없는 메일은 건드리지 않는다.
+ */
+async function offerDirectCompose(item: Office.MessageCompose) {
+  const direct = document.getElementById("compose-direct")!;
+  direct.hidden = true;
+  const subject = await call<string>((done) => item.subject.getAsync(done));
+  const match = await matchReply({
+    snapshot: {
+      subject,
+      from: { name: "", email: "" },
+      to: [],
+      cc: [],
+      receivedAt: "",
+      bodyText: "",
+      conversationId: item.conversationId ?? "",
+      internetMessageId: "",
+      inReplyTo: "",
+      references: [],
+      attachments: [],
+    },
+    emlBase64: null,
+    actor: currentUserEmail(),
+  });
+  const caseId = match.candidates[0]?.caseId;
+  if (!caseId) {
+    setText("compose-state", "케이스와 연결된 메일이 아니라서 바꾸지 않았습니다. 그대로 쓰고 보내면 됩니다.");
+    return;
+  }
+  setText("compose-state", `케이스 ${caseId}의 메일에 대한 회신입니다. 필요하면 아래 버튼으로 보완 요청 또는 견적서 송부로 만드세요. 누르기 전에는 바꾸지 않습니다.`);
+  direct.hidden = false;
+  document.getElementById("compose-supplement")!.onclick = () => runDirectCompose(item, caseId, "SUPPLEMENT");
+  document.getElementById("compose-quote")!.onclick = () => runDirectCompose(item, caseId, "QUOTE");
+}
+
+/** 직접 연 작성 창을 보완 요청·견적서 송부 초안으로 만든다: 제목·본문·첨부를 채우고 초안함에 저장 (FR-304·505). 보내지 않는다. */
+async function runDirectCompose(item: Office.MessageCompose, caseId: string, kind: "SUPPLEMENT" | "QUOTE") {
+  setBusy(true);
+  setStatus("초안을 준비하는 중…", "info");
+  try {
+    const actor = currentUserEmail();
+    const questions = (document.getElementById("compose-questions") as HTMLTextAreaElement).value.split("\n");
+    const draft = kind === "SUPPLEMENT" ? await supplementDraft(caseId, questions, actor) : await quoteDraft(caseId, actor);
+    const current = await call<string>((done) => item.subject.getAsync(done));
+    const isReply = /^(re|회신)\s*:/i.test(current);
+    // 회신 창이면 받는 사람은 Outlook이 이미 채웠다. 비어 있을 때만 케이스의 화주 주소를 넣는다
+    const to = await call<Office.EmailAddressDetails[]>((done) => item.to.getAsync(done));
+    if (to.length === 0) await call<void>((done) => item.to.setAsync(draft.to.map((a) => a.email), done));
+    // 담당자가 이미 쓴 내용·인용문은 그대로 두고 맨 위에 넣는다
+    await call<void>((done) => item.body.prependAsync(draft.htmlBody, { coercionType: Office.CoercionType.Html }, done));
+    await finalizeDraft(
+      item,
+      { caseId, kind, subject: isReply ? `RE: ${draft.subject}` : draft.subject, attachments: draft.attachments, createdAt: Date.now() },
+      (step) => setText("compose-state", step)
+    );
+    document.getElementById("compose-direct")!.hidden = true;
+    setText("compose-state", `${caseId} ${kind === "SUPPLEMENT" ? "보완 요청" : "견적서 송부"} 초안을 초안함에 저장했습니다.`);
+    setStatus("내용을 확인한 뒤 직접 [보내기]를 눌러 주세요. 자동으로 보내지 않습니다.", "success");
+  } catch (error) {
+    setStatus(messageOf(error), "error");
+  } finally {
+    setBusy(false);
+  }
+}
+
 /** [작성 창] 패널이 준비한 초안이면 제목 케이스 ID·첨부를 채우고 초안함에 저장한다 (FR-304·505). */
 async function runComposeFinalize() {
   const item = Office.context.mailbox.item as Office.MessageCompose;
@@ -85,7 +152,7 @@ async function runComposeFinalize() {
   try {
     const pending = await findPendingDraft(item);
     if (!pending) {
-      setText("compose-state", "LEONA 패널에서 연 초안이 아니라서 바꾸지 않았습니다. 직접 쓴 회신·새 메일은 그대로 보내면 됩니다. 보완 요청·견적서 송부라면 케이스 메일의 LEONA 패널에서 [보완 요청 초안 열기] 또는 [견적서 송부 초안 열기]를 먼저 누르세요.");
+      await offerDirectCompose(item);
       return;
     }
     await finalizeDraft(item, pending, (step) => setText("compose-state", step));

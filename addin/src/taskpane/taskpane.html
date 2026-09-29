@@ -33,6 +33,15 @@
             <h2>초안 마무리</h2>
             <p id="compose-state"></p>
             <button id="compose-retry" class="button" hidden>다시 시도</button>
+            <!-- 담당자가 Outlook [회신]으로 직접 연 작성 창: 케이스 메일이면 여기서 보완 요청·견적서 송부로 만든다 -->
+            <div id="compose-direct" hidden>
+                <label for="compose-questions" class="label">보완 요청 문항 (한 줄에 하나 · C트랙 검증 연결 전 임시 입력)</label>
+                <textarea id="compose-questions" rows="4" placeholder="예) 선적항(POL)을 알려 주세요."></textarea>
+                <div class="buttons">
+                    <button id="compose-supplement" class="button">보완 요청으로 만들기</button>
+                    <button id="compose-quote" class="button">견적서 첨부해 송부로 만들기</button>
+                </div>
+            </div>
         </section>
 
         <div id="read-body">

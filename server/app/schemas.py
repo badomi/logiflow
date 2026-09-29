@@ -6,7 +6,7 @@ JSON 키는 camelCase(6장 필드 표기와 동일), 파이썬 코드 안에서�
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
 
@@ -38,6 +38,12 @@ class MailSnapshot(CamelModel):
     in_reply_to: str | None = None  # 회신 식별(FR-104)
     references: list[str] = []  # 회신 식별(FR-104)
     attachments: list[AttachmentInfo] = []
+
+    @field_validator("received_at", mode="before")
+    @classmethod
+    def _blank_time_is_none(cls, value):
+        """작성 창처럼 수신 시각이 없는 메일은 빈 문자열로 온다 → '없음'으로 받는다."""
+        return None if isinstance(value, str) and not value.strip() else value
 
 
 class MailInput(CamelModel):
