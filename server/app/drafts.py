@@ -17,8 +17,8 @@ from .config import settings
 from .models import Case, CaseEvent
 from .schemas import Address, DraftAttachment, DraftOut
 
-SIGNATURE_KO = "LEONA Shipping & Air 견적 담당"
-SIGNATURE_EN = "LEONA Shipping & Air Quotation Team"
+SIGNATURE_KO = "레오나해운항공㈜ 견적 담당"
+SIGNATURE_EN = "LEONA SEA &amp; AIR CO., LTD. Quotation Team"
 
 QUOTE_EXTENSIONS = {".pdf", ".xlsx"}
 
@@ -60,13 +60,13 @@ def supplement_draft(session: Session, case: Case, questions: list[str], actor: 
     subject = f"[{case.case_id}] 견적 보완 요청 / Request for additional information - {_original(case).subject or ''}".strip()
     items = "".join(f"<li>{escape(q)}</li>" for q in questions)
     body = (
-        "<p>안녕하세요, LEONA Shipping &amp; Air입니다.<br>"
+        "<p>안녕하세요, 레오나해운항공㈜입니다.<br>"
         "요청하신 견적을 산출하기 위해 아래 항목을 추가로 알려 주시기 바랍니다.</p>"
         f"<ol>{items}</ol>"
         f"<p>회신 시 제목의 케이스 번호({escape(case.case_id)})를 유지해 주시면 빠르게 처리됩니다.<br>"
         f"감사합니다.<br>{SIGNATURE_KO}</p>"
         "<hr>"
-        "<p>Hello, this is LEONA Shipping &amp; Air.<br>"
+        "<p>Hello, this is LEONA SEA &amp; AIR CO., LTD.<br>"
         "To prepare your quotation, please provide the information listed above.<br>"
         f"Please keep the case number ({escape(case.case_id)}) in the subject when replying.<br>"
         f"Thank you.<br>{SIGNATURE_EN}</p>"
@@ -183,7 +183,7 @@ def quote_draft(session: Session, case: Case, actor: str | None) -> DraftOut:
     subject = f"[{case.case_id}] 견적서 송부 / Quotation - {_original(case).subject or ''}".strip()
     names = "".join(f"<li>{escape(f.name)}</li>" for f in files)
     body = (
-        "<p>안녕하세요, LEONA Shipping &amp; Air입니다.<br>"
+        "<p>안녕하세요, 레오나해운항공㈜입니다.<br>"
         "요청하신 견적서를 첨부와 같이 송부드립니다. 검토 부탁드립니다.</p>"
         f"<ul>{names}</ul>"
         f"<p>감사합니다.<br>{SIGNATURE_KO}</p>"
