@@ -107,8 +107,15 @@ async function offerDirectCompose(item: Office.MessageCompose) {
     setText("compose-state", "케이스와 연결된 메일이 아니라서 바꾸지 않았습니다. 그대로 쓰고 보내면 됩니다.");
     return;
   }
-  setText("compose-state", `케이스 ${caseId}의 메일에 대한 회신입니다. 필요하면 아래에서 보완 요청 또는 견적서 송부 초안으로 만드세요. 누르기 전에는 바꾸지 않습니다.`);
-  document.getElementById("compose-section")!.after(card); // 읽기 영역(숨김) 밖으로 옮겨 보이게 한다
+  // 읽기 화면과 같은 카드(케이스 상태·케이스 자료·메일 초안)를 숨겨진 읽기 영역 밖으로 옮겨 그대로 보여준다
+  const compose = document.getElementById("compose-section")!;
+  compose.hidden = true;
+  const caseCard = document.getElementById("case-section")!;
+  const files = document.getElementById("files-section")!;
+  compose.after(caseCard, files, card);
+  currentCaseId = caseId;
+  setText("case-state", `작성 중인 이 메일은 케이스 ${caseId}에 대한 회신입니다. 아래 버튼을 누르기 전에는 메일을 바꾸지 않습니다.`);
+  renderCaseFiles(caseId);
   card.hidden = false;
   document.getElementById("supplement-draft")!.onclick = () => runDirectCompose(item, caseId, "SUPPLEMENT");
   document.getElementById("quote-draft")!.onclick = () => runDirectCompose(item, caseId, "QUOTE");
@@ -132,10 +139,10 @@ async function runDirectCompose(item: Office.MessageCompose, caseId: string, kin
     await finalizeDraft(
       item,
       { caseId, kind, subject: isReply ? `RE: ${draft.subject}` : draft.subject, attachments: draft.attachments, createdAt: Date.now() },
-      (step) => setText("compose-state", step)
+      (step) => setStatus(step, "info")
     );
     document.getElementById("draft-section")!.hidden = true;
-    setText("compose-state", `${caseId} ${kind === "SUPPLEMENT" ? "보완 요청" : "견적서 송부"} 초안을 초안함에 저장했습니다.`);
+    setText("case-state", `${caseId} ${kind === "SUPPLEMENT" ? "보완 요청" : "견적서 송부"} 초안을 초안함에 저장했습니다.`);
     setStatus("내용을 확인한 뒤 직접 [보내기]를 눌러 주세요. 자동으로 보내지 않습니다.", "success");
   } catch (error) {
     setStatus(messageOf(error), "error");
