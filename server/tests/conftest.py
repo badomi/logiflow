@@ -9,6 +9,12 @@ from pathlib import Path
 _TMP = Path(tempfile.mkdtemp(prefix="leona-test-"))
 os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
 os.environ["STORAGE_DIR"] = str(_TMP / "storage")
+# 개인 server\.env 설정과 상관없이 같은 조건으로 테스트한다 (환경 변수가 .env보다 우선).
+# 추출·LLM이 필요한 테스트는 테스트 안에서 직접 연결한다 (test_pipeline_flow.py의 connect).
+os.environ["EXTRACTION_MODE"] = "off"
+os.environ["QUOTE_PDF"] = "false"
+os.environ["LLM_URL"] = "http://localhost:11434"
+os.environ["LLM_SCOPE"] = "all"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
