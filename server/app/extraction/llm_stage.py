@@ -23,7 +23,6 @@ LLM_FIELDS = {
     "grossWeight": "총중량과 적힌 단위 그대로 (예: 500 kg, 2650 lbs, 0.5 ton)",
     "portOfLoading": "선적 항구 이름 (픽업지·공장 주소 아님)",
     "portOfDischarge": "도착 항구 이름",
-    "pickupLocation": "픽업지·출고지",
     "cargoReadyDate": "화물 준비일 YYYY-MM-DD (연도가 안 적혀 있으면 '10월 20일'처럼 적힌 그대로)",
     "incoterms": "거래 조건 (FOB, CIF 등). 여러 개면 모두",
     "container": "컨테이너 규격과 대수 (예: 40HQ x 2) 또는 LCL",
@@ -61,7 +60,7 @@ CONTACT_KEYS = ("customerName", "contactName", "contactEmail")
 KEY_GROUP = {
     "commodity": "commodity", "quantity": "qty", "packing": "packing", "boxDimensions": "box",
     "totalVolume": "totalCbm", "grossWeight": "grossWeightKg", "portOfLoading": "pol", "portOfDischarge": "pod",
-    "pickupLocation": "pickupLocation", "cargoReadyDate": "cargoReadyDate", "incoterms": "incoterms",
+    "cargoReadyDate": "cargoReadyDate", "incoterms": "incoterms",
     "container": "containerType", "invoiceValue": "invoiceValue", "currency": "ccy", "paymentTerm": "paymentTerm",
 }
 # 보완 질문 항목 → 프롬프트에 보여 줄 이름 (번호 답변 해석용)

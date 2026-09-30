@@ -577,3 +577,22 @@ def test_question_particles_follow_final_consonant():
 
     assert ("총중량" + josa("총중량", "을", "를"), "포장 형태" + josa("포장 형태", "을", "를")) == ("총중량을", "포장 형태를")
     assert "360kg" + josa("360kg", "이라고", "라고") == "360kg이라고"
+
+
+def test_reply_merge_quirks_from_real_test(client, connect):
+    """실제 테스트(②번 메일)에서 본 어색한 점: 규격 '(확인 필요)', 픽업지=회사명, 담당자=회신 계정 이름."""
+    original = ("품목: 문구류(노트)\n박스 수량: 20박스\n박스 규격: 40 x 30 x 25 cm\n총중량: 180kg\n도착항: 싱가포르\n"
+                "선적방식: LCL\n\n감사합니다.\n이지은 과장\n서울문구 주식회사")
+    llm = LineLlm({"boxDimensions": ("40 x 30 x 25", "박스 규격")})  # 작은 모델이 단위를 빼먹음 → 확신 낮은 값
+    connect(llm, mode="hybrid")
+    first = client.post("/api/cases", json=text_mail(original, sender="jieun@seoul.example.com")).json()["case"]
+    case_id = first["caseId"]
+    client.post(f"/api/cases/{case_id}/drafts/supplement", json={})
+    reply_mail = text_mail("1. 부산\n2. 2026-10-27\n3. CIF\n4. USD 2,400\n5. T/T 100% Advance", subject=f"RE: [{case_id}]")
+    reply_mail["snapshot"]["from"] = {"name": "김민종", "email": "minjong@gmail.example.com"}
+    case = reply(client, case_id, reply_mail)
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case_id}/fields").json()}
+    assert fields["boxL"]["status"] == "filled" and fields["boxL"]["value"] == 400  # 확신 낮은 LLM 값이 흔들지 않음
+    assert fields["contactName"]["value"] == "이지은 과장"  # 서명 이름이 회신 계정 이름보다 우선
+    assert "pickupLocation" not in case["extraction"]["result"]["llm"]["asked"]
+    assert case["status"] == "계산완료"

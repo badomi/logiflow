@@ -53,10 +53,18 @@ def _same(a, b) -> bool:
     return len(short) >= 2 and short in long_
 
 
+PEOPLE_FIELDS = ("customerName", "contactName")
+
+
 def _pick(cands: list[Candidate], field: str) -> Candidate | None:
-    """최신 출처부터, 임계치를 넘는 첫 후보. 없으면 점수가 가장 높은 후보."""
+    """최신 출처부터, 임계치를 넘는 첫 후보. 없으면 점수가 가장 높은 후보.
+
+    담당자·고객사는 예외: 회신을 다른 계정에서 보내도 서명에 적힌 이름(0.9)이 발신자 표시 이름(0.8)보다 확실하다.
+    """
     if not cands:
         return None
+    if field in PEOPLE_FIELDS:
+        return max(cands, key=lambda c: (c.score, c.order))
     t = threshold(field)
     ordered = sorted(cands, key=lambda c: (-c.order, -c.score))
     return next((c for c in ordered if c.score >= t), max(cands, key=lambda c: c.score))
@@ -68,6 +76,10 @@ def combine(field: str, rule_c: Candidate | None, llm_c: Candidate | None) -> di
         return {"value": None, "score": 0.0, "evidence": None, "origin": None, "method": None, "status": "missing"}
     if rule_c and llm_c and (rule_c.unparsed or llm_c.unparsed) and not (rule_c.unparsed and llm_c.unparsed):
         rule_c, llm_c = (None, llm_c) if rule_c.unparsed else (rule_c, None)  # 제대로 읽힌 쪽만 쓴다
+    if rule_c and llm_c and not _same(rule_c.value, llm_c.value):
+        weak_rule, weak_llm = rule_c.score < t, llm_c.score < t
+        if weak_rule != weak_llm:  # 확신 낮은 값(단위 빠진 규격 등)이 확실한 값을 흔들지 않게 → 확실한 쪽만
+            rule_c, llm_c = (None, llm_c) if weak_rule else (rule_c, None)
     if rule_c and llm_c:
         if _same(rule_c.value, llm_c.value):
             chosen = rule_c if rule_c.order >= llm_c.order else llm_c
