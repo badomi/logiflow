@@ -46,6 +46,7 @@ class Candidate:
     origin: str  # Source.label
     order: int
     method: str  # rule / llm / signature / header
+    unparsed: bool = False  # 값을 찾았지만 형식에 맞게 해석하지 못함 → 저장하지 않고 '확인 필요'로 원문을 보여 준다
 
 
 @lru_cache
@@ -56,3 +57,15 @@ def dictionary() -> dict:
 def threshold(field_name: str) -> float:
     table = dictionary()["thresholds"]
     return float(table.get(field_name, table["default"]))
+
+
+UNPARSED_SCORE = 0.5  # 해석 실패 후보의 점수 — 어떤 임계치보다 낮아 저장되지 않고, 제대로 읽힌 후보가 있으면 항상 진다
+
+# 규칙 라벨 그룹 → 그 그룹이 채우는 6장 필드 (해석 실패를 어느 필드에 '확인 필요'로 남길지)
+GROUP_FIELDS = {
+    "commodity": ("commodity",), "qty": ("qty",), "qtyUnit": ("qty",), "packing": ("packing",),
+    "box": ("boxL",), "volume": ("totalCbm",), "totalCbm": ("totalCbm",), "grossWeightKg": ("grossWeightKg",),
+    "pol": ("pol",), "pod": ("pod",), "cargoReadyDate": ("cargoReadyDate",), "incoterms": ("incoterms",),
+    "containerType": ("containerType",), "invoiceValue": ("invoiceValue",), "ccy": ("ccy",),
+    "paymentTerm": ("paymentTerm",), "cargoDetail": (), "pickupLocation": (),
+}

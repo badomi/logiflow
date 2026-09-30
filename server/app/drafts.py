@@ -42,6 +42,15 @@ def _recipient(case: Case) -> list[Address]:
     return [Address(name=original.from_name or "", email=original.from_email or "")]
 
 
+def validation_issues(case: Case) -> list[dict]:
+    """가장 최근 검증 결과의 문제 목록 (질문이 있는 것만, 순서 유지)."""
+    for event in reversed(case.events):
+        if event.event_type == "PIPELINE_RUN":
+            validation = json.loads(event.detail or "{}").get("validation") or {}
+            return [i for i in validation.get("issues") or [] if i.get("question")]
+    return []
+
+
 def validation_questions(case: Case) -> list[str]:
     """가장 최근 검증(C트랙) 결과의 보완 문항 (FR-304). 검증이 안 돌았으면 빈 목록."""
     for event in reversed(case.events):
@@ -81,15 +90,21 @@ def supplement_draft(session: Session, case: Case, questions: list[str], actor: 
         "<p>안녕하세요, 레오나해운항공㈜입니다.<br>"
         "요청하신 견적을 산출하기 위해 아래 항목을 추가로 알려 주시기 바랍니다.</p>"
         f"<ol>{items}</ol>"
-        f"<p>회신 시 제목의 케이스 번호({escape(case.case_id)})를 유지해 주시면 빠르게 처리됩니다.<br>"
+        "<p>번호에 맞춰 답만 적어 주셔도 됩니다. (예: 1. 2026-10-20)<br>"
+        f"회신 시 제목의 케이스 번호({escape(case.case_id)})를 유지해 주시면 빠르게 처리됩니다.<br>"
         f"감사합니다.<br>{SIGNATURE_KO}</p>"
         "<hr>"
         "<p>Hello, this is LEONA SEA &amp; AIR CO., LTD.<br>"
-        "To prepare your quotation, please provide the information listed above.<br>"
+        "To prepare your quotation, please provide the information listed above. You may simply reply by number.<br>"
         f"Please keep the case number ({escape(case.case_id)}) in the subject when replying.<br>"
         f"Thank you.<br>{SIGNATURE_EN}</p>"
     )
-    _record(session, case, "SUPPLEMENT", actor, {"subject": subject, "questionCount": len(questions)})
+    # 몇 번 질문이 어떤 항목인지 남긴다 → 화주가 '1. 2026-10-20'처럼 번호로만 답해도 추출이 알아본다
+    by_text = {i["question"]: i["field"] for i in validation_issues(case)}
+    _record(session, case, "SUPPLEMENT", actor, {
+        "subject": subject, "questionCount": len(questions), "questions": questions,
+        "questionFields": [by_text.get(q) for q in questions],  # 담당자가 고친 질문은 None
+    })
     return DraftOut(kind="SUPPLEMENT", case_id=case.case_id, to=_recipient(case), subject=subject, html_body=body, attachments=[])
 
 

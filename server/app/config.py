@@ -22,7 +22,9 @@ class Settings(BaseSettings):
     extraction_mode: str = "off"
     llm_url: str = "http://localhost:11434"
     llm_model: str = "qwen3:8b"
-    llm_think: bool = False  # 생각(thinking) 모드. 켜면 긴 추론이 먼저 나와 60초를 넘기기 쉽다 → 기본 끔
+    llm_think: bool = False
+    # all: LLM이 모든 항목을 읽고 규칙은 교차 확인 (기본, 유연) / missing: 규칙이 못 찾은 빈 칸만 LLM (느린 PC)
+    llm_scope: str = "all"  # 생각(thinking) 모드. 켜면 긴 추론이 먼저 나와 60초를 넘기기 쉽다 → 기본 끔
     llm_timeout_s: float = 45.0  # 추출+검증+견적 전체가 60초 안에 끝나야 한다 (FR-101). 넘으면 룰 결과로 진행
     llm_num_ctx: int = 8192  # Ollama 기본 컨텍스트는 짧아 긴 메일이 '조용히' 잘린다 → 명시
     llm_keep_alive: str = "30m"  # 모델을 메모리에 유지 (매 요청마다 로딩하면 10초 이상 추가)

@@ -6,6 +6,7 @@
 ⚠ 테스트용 요율 출처 (모두 발주 측 제공 자료, 실제 요율 아님):
   1) docs/양식의 LCL·FOB 예시 견적서 — 인천 LCL 부대비용, 부산 40HQ 부대비용
   2) docs/samples.md 3번 'D선사 월간 운임표' — 부산 출발 해상운임 17개 항구 × 20'GP·40'HC·40'REEFER
+  3) 부산→싱가포르 LCL — 자료에 없어 1)의 인천 LCL 금액을 준용
      (자료에 출발항이 없어 부산으로 가정, VALIDITY '~월말'은 월 표기가 없어 기간 없이 등록)
   발주 측 요율표·부대비용 Excel(미수령)을 받으면 그 값으로 교체해야 한다.
 """
@@ -72,10 +73,24 @@ MONTHLY_OFT = [
 ]
 # 하단 조건 'SURCHARGES : ISPS USD 0 (Common Item)' → 별도 비용 줄 없음
 
+# 부산 출발 LCL — 자료에 없는 구간이라 인천 LCL 예시 견적서 금액을 그대로 준용 (해상운임 포함, 실제 요율 아님)
+BUSAN_LCL_SOURCE = "TEST: 부산 LCL (인천 LCL 예시 금액 준용, 실제 요율 아님)"
+BUSAN_LCL_RATES = [
+    ("OCEAN_FREIGHT", "OCEAN FREIGHT", "KRPUS", "SGSIN", "LCL", "CIF", "PER_RT", 500.0, "USD", "PER R/T", 10),
+    ("THC", "THC", "KRPUS", None, "LCL", None, "PER_RT", 5_500, "KRW", "PER R/T", 20),
+    ("CFS", "CFS", "KRPUS", None, "LCL", None, "PER_RT", 6_500, "KRW", "PER R/T", 30),
+    ("WFG", "WFG", "KRPUS", None, "LCL", None, "PER_RT", 203, "KRW", "PER R/T", 40),
+    ("SHUTTLE", "SHUTTLE CHARGE", "KRPUS", None, "LCL", None, "PER_RT", 5_000, "KRW", "PER R/T", 50),
+    ("DOC_FEE", "DOCUMENT FEE", "KRPUS", None, "LCL", None, "PER_BL", 90_000, "KRW", "PER B/L", 60),
+    ("CUSTOMS", "CUSTOMS CLEARANCE FEE", "KRPUS", None, "LCL", None, "PER_BL", 15_000, "KRW", "INV.V x 1/1,000 (MIN 기준)", 80),
+    ("INSURANCE", "INSURANCE FEE", "KRPUS", None, "LCL", "CIF", "PER_BL", 18_000, "KRW", "INV.V x 110% x 보험요율 (MIN 기준)", 90),
+]
+
 # 내륙운송비(TRUCKING)는 픽업지마다 달라 6장 필드만으로 고를 수 없다 → 요율표 수령 후 픽업지 기준 설계 필요
 
 SAMPLE_LANES = [
     ("KRINC", "AUSYD", "LCL", "USD", None, None, None, 14),
+    ("KRPUS", "SGSIN", "LCL", "USD", None, None, None, 14),
     ("KRPUS", None, "40HQ", "USD", None, None, None, 14),
 ]
 
@@ -86,7 +101,12 @@ def seed_containers(session: Session) -> None:
 
 
 def seed_sample_rates(session: Session) -> None:
-    session.execute(delete(Rate).where(Rate.source.in_([SAMPLE_SOURCE, OFT_SOURCE])))
+    session.execute(delete(Rate).where(Rate.source.in_([SAMPLE_SOURCE, OFT_SOURCE, BUSAN_LCL_SOURCE])))
+    for code, label, pol, pod, cntr, terms, basis, price, ccy, remark, order in BUSAN_LCL_RATES:
+        session.add(Rate(
+            charge_code=code, charge_label=label, pol=pol, pod=pod, container_type=cntr, incoterms=terms,
+            basis=basis, unit_price=price, currency=ccy, remark=remark, sort_no=order, source=BUSAN_LCL_SOURCE,
+        ))
     for pod, gp20, hc40, rf40, remark in MONTHLY_OFT:
         for cntr, price in (("20FT GP", gp20), ("40HQ", hc40), ("40RF", rf40)):
             if price is None:

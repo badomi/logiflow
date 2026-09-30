@@ -1,6 +1,6 @@
 {
   "_comment": "FR-205 국·영문 키워드 사전 + FR-209 임계치. 코드 수정 없이 이 파일만 고쳐서 운영한다 (NFR-06).",
-  "version": "dict-2026-09-29",
+  "version": "dict-2026-09-30",
   "thresholds": {
     "default": 0.75,
     "commodity": 0.7,
@@ -219,6 +219,16 @@
       "화물내역",
       "shipment detail",
       "cargo info"
+    ],
+    "ccy": [
+      "통화",
+      "화폐",
+      "결제 통화",
+      "인보이스 통화",
+      "금액 통화",
+      "currency",
+      "ccy",
+      "invoice currency"
     ]
   },
   "multiItemHeader": "^\\s*[\\[【(〔]\\s*[^\\]】)〕]{1,20}\\s*[\\]】)〕]\\s*$",

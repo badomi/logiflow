@@ -41,6 +41,8 @@ def build_sources(mails: list[MailText]) -> tuple[list[Source], list[Candidate]]
 
 
 def _same(a, b) -> bool:
+    if isinstance(a, str) != isinstance(b, str) and (isinstance(a, (int, float)) or isinstance(b, (int, float))):
+        return False
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
         return abs(a - b) <= max(abs(a), abs(b)) * 0.01
     x, y = str(a).strip().lower(), str(b).strip().lower()
@@ -64,6 +66,8 @@ def combine(field: str, rule_c: Candidate | None, llm_c: Candidate | None) -> di
     t = threshold(field)
     if rule_c is None and llm_c is None:
         return {"value": None, "score": 0.0, "evidence": None, "origin": None, "method": None, "status": "missing"}
+    if rule_c and llm_c and (rule_c.unparsed or llm_c.unparsed) and not (rule_c.unparsed and llm_c.unparsed):
+        rule_c, llm_c = (None, llm_c) if rule_c.unparsed else (rule_c, None)  # 제대로 읽힌 쪽만 쓴다
     if rule_c and llm_c:
         if _same(rule_c.value, llm_c.value):
             chosen = rule_c if rule_c.order >= llm_c.order else llm_c
@@ -80,38 +84,50 @@ def combine(field: str, rule_c: Candidate | None, llm_c: Candidate | None) -> di
     else:
         chosen = rule_c or llm_c
         score, method, conflict = chosen.score, chosen.method, None
-    status = "filled" if score >= t and not conflict else "review"  # 룰·LLM이 엇갈리면 저장하지 않는다
+    status = "filled" if score >= t and not conflict and not chosen.unparsed else "review"  # 엇갈리거나 해석 실패면 저장 안 함
     result = {
         "value": chosen.value, "score": round(score, 3), "evidence": chosen.evidence, "origin": chosen.origin,
         "method": method, "status": status,
     }
+    if chosen.unparsed:
+        result["reason"] = "UNPARSED"  # 값을 찾았지만 형식에 맞게 읽지 못함 → 원문을 짚어 확인 질문
     if conflict:
         result["conflict"] = conflict
     return result
 
 
-def run(mails: list[MailText], llm=None, model_name: str | None = None) -> dict:
+def run(mails: list[MailText], llm=None, model_name: str | None = None, asked: list[str | None] | None = None,
+        scope: str = "all") -> dict:
     """고정 스키마 JSON (FR-201). 각 필드 = {value, score, evidence, origin, method, status}."""
     began = time.monotonic()
     sources, people = build_sources(mails)
-    rule_cands, notes, multi_rule = rules.extract(sources)
+    rule_cands, notes, multi_rule = rules.extract(sources, asked)
     rule_cands += people
 
-    llm_info: dict = {"used": False, "model": model_name}
+    llm_info: dict = {"used": False, "model": model_name, "scope": scope}
     llm_cands: list[Candidate] = []
     multi_llm = False
+    keys: list[str] = []
     if llm is not None:
         rule_only = {n: combine(n, _pick([c for c in rule_cands if c.field == n], n), None) for n in FIELDS}
-        keys = llm_targets(rule_only, notes, multi_rule, sources, rule_cands)
+        if multi_rule:
+            keys = []  # 다품목은 화물 값을 저장하지 않으므로 물어볼 필요 없음 (FR-210)
+        elif scope == "all":
+            # LLM 중심: 모든 항목을 LLM이 읽고 규칙은 교차 확인. 헤더 이메일은 확실하니 묻지 않는다
+            keys = [k for k in llm_stage.LLM_FIELDS
+                    if not (k == "contactEmail" and rule_only["contactEmail"]["status"] == "filled")]
+        else:
+            keys = llm_targets(rule_only, notes, multi_rule, sources, rule_cands)  # 빈 칸만 (느린 PC)
         llm_info["asked"] = keys
         if not keys:
             llm_info["skipped"] = "다품목" if multi_rule else "규칙으로 모두 찾음"
     if llm is not None and keys:
         started = time.monotonic()
         try:
-            raw = llm.complete_json(llm_stage.SYSTEM_PROMPT, llm_stage.build_prompt(sources, keys),
-                                    llm_stage.schema_for(keys))
-            llm_cands, llm_notes, multi_llm = llm_stage.to_candidates(raw, sources, grounding.ground, asked=keys)
+            prompt, index = llm_stage.build_prompt(sources, keys, asked)
+            raw = llm.complete_json(llm_stage.SYSTEM_PROMPT, prompt, llm_stage.schema_for(keys))
+            llm_cands, llm_notes, multi_llm = llm_stage.to_candidates(raw, index, sources, keys)
+            _guard_pickup_as_port(llm_cands, rule_cands)
             notes += [{**n, "origin": "LLM"} for n in llm_notes]
             llm_info.update(used=True, dropped=_count_dropped(raw, llm_cands))
         except Exception as error:  # LLM이 없거나 실패해도 룰 결과로 계속 (NFR-03)
@@ -190,6 +206,14 @@ def llm_targets(rule_only: dict, notes: list[dict], multi_rule: bool, sources: l
     if all(k in llm_stage.CONTACT_KEYS for k in keys):
         return []
     return keys
+
+
+def _guard_pickup_as_port(llm_cands: list[Candidate], rule_cands: list[Candidate]) -> None:
+    """작은 모델이 '픽업지: 인천' 줄을 선적항으로 읽는 실수 방지 — 규칙이 픽업지로 읽은 줄이면 저장 안 함(확인 필요)."""
+    pickup_lines = {c.evidence.strip() for c in rule_cands if c.field == "pickupLocation"}
+    for c in llm_cands:
+        if c.field in ("pol", "pod") and c.evidence.strip() in pickup_lines:
+            c.score = round(c.score * 0.6, 3)
 
 
 def _keep_box_together(fields: dict) -> None:

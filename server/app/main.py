@@ -293,6 +293,14 @@ def rerun_extraction(case_id: str, body: ActorRequest, background: BackgroundTas
     return services.case_detail(case)
 
 
+@app.get("/api/extraction/review-report")
+def extraction_review_report(days: int = 30, session: Session = Depends(get_session)) -> dict:
+    """놓친 표현 모아 보기: 찾았지만 읽지 못한 원문(unparsed)·확신 낮은 값(lowConfidence)을 항목별로"""
+    from .extraction.report import collect
+
+    return collect(session, days)
+
+
 # ---------------------------------------------------------------- 요율 엑셀 관리 (NFR-06)
 
 XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

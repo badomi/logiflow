@@ -35,6 +35,16 @@ def mails_of(case: Case) -> list[MailText]:
     return out
 
 
+def asked_fields(case: Case) -> list[str | None] | None:
+    """마지막 보완 요청에서 보낸 질문의 항목 (번호 순). 번호로만 답한 회신을 읽는 데 쓴다."""
+    for event in reversed(case.events):
+        if event.event_type == "DRAFT_PREPARED":
+            detail = json.loads(event.detail or "{}")
+            if detail.get("kind") == "SUPPLEMENT":
+                return detail.get("questionFields")
+    return None
+
+
 def manual_fields(session: Session, case: Case) -> set[str]:
     rows = session.scalars(
         select(ExtractionField.field_name).where(ExtractionField.case_pk == case.id, ExtractionField.method == "manual")
@@ -64,7 +74,8 @@ class HybridExtractor:
             client, setup_error = None, str(error)
         else:
             setup_error = None
-        result = engine.run(mails_of(case), llm=client, model_name=settings.llm_model if client else None)
+        result = engine.run(mails_of(case), llm=client, model_name=settings.llm_model if client else None,
+                            asked=asked_fields(case), scope=settings.llm_scope)
         if setup_error:
             result["llm"]["error"] = setup_error
 
@@ -86,7 +97,9 @@ class HybridExtractor:
             session.add(ExtractionField(
                 case=case, run_no=run_no, field_name=name,
                 value=None if f["value"] is None else json.dumps(f["value"], ensure_ascii=False),
-                score=f["score"], evidence=f["evidence"], origin=f["origin"], method=f["method"], status=f["status"],
+                score=f["score"], evidence=f["evidence"], origin=f["origin"], status=f["status"],
+                # 해석 못 한 값은 method에 표시 → 'python -m app.extraction.report'로 모아 보고 사전을 보강한다
+                method=(f"{f['method']}:unparsed" if f.get("reason") == "UNPARSED" and f["method"] else f["method"]),
             ))
         session.flush()
 

@@ -77,13 +77,16 @@ _LEN_UNIT = _unit_pattern(_LENGTH)
 _DIMS_RE = re.compile(
     rf"({NUM})\s*({_LEN_UNIT})?\s*[x*]\s*({NUM})\s*({_LEN_UNIT})?\s*[x*]\s*({NUM})\s*({_LEN_UNIT})?(?![a-z])", re.I
 )
+_KO_LWH_RE = re.compile(
+    rf"(?:가로|길이)\s*[:=]?\s*({NUM})\s*({_unit_pattern(_LENGTH)})?.*?(?:세로|폭|너비)\s*[:=]?\s*({NUM})\s*({_unit_pattern(_LENGTH)})?"
+    rf".*?(?:높이)\s*[:=]?\s*({NUM})\s*({_unit_pattern(_LENGTH)})?", re.I)
 _LWH_RE = re.compile(rf"L\s*[:=]?\s*({NUM})\s*.*?W\s*[:=]?\s*({NUM})\s*.*?H\s*[:=]?\s*({NUM})\s*({_LEN_UNIT})?", re.I)
 
 
 def parse_dims_mm(text: str) -> Parsed | None:
     """'310 x 450 x 270mm', '31x45x27 cm', '12 x 18 x 10 inch', 'L310 W450 H270' → (L, W, H) mm 정수."""
     text = clean(text)
-    match = _DIMS_RE.search(text)
+    match = _DIMS_RE.search(text) or _KO_LWH_RE.search(text)
     if match:
         numbers = [to_number(match[i]) for i in (1, 3, 5)]
         unit = match[6] or match[4] or match[2]
@@ -117,7 +120,7 @@ PACKING_OF_UNIT = {"CTNS": "Carton", "PLTS": "Pallet", "CRATES": "Crate", "DRUMS
 _PACKING_WORDS = {
     "Carton": ("carton", "ctn", "box", "박스", "상자", "카톤"),
     "Pallet": ("pallet", "plt", "팔레트", "파레트"),
-    "Crate": ("crate", "크레이트", "나무상자"),
+    "Crate": ("crate", "크레이트", "나무상자", "나무 상자", "나무박스", "나무 박스", "wooden case", "wooden box", "우드케이스", "목상자"),
     "Drum": ("drum", "드럼"),
 }
 
@@ -135,9 +138,18 @@ def parse_qty(text: str) -> Parsed | None:
 
 
 def parse_packing(text: str) -> Parsed | None:
+    """포장 단어 → 코드. 여러 개에 걸리면 더 구체적인(긴) 표현을 따른다 ('나무 박스' → Crate, '박스' → Carton)."""
     lowered = clean(text).lower()
-    found = [code for code, words in _PACKING_WORDS.items() if any(w in lowered for w in words)]
-    return Parsed(found[0], 1.0, text) if len(found) == 1 else None
+    best: dict[str, int] = {}
+    for code, words in _PACKING_WORDS.items():
+        hits = [len(w) for w in words if w in lowered]
+        if hits:
+            best[code] = max(hits)
+    if not best:
+        return None
+    top = max(best.values())
+    winners = [c for c, n in best.items() if n == top]
+    return Parsed(winners[0], 1.0, text) if len(winners) == 1 else None
 
 
 # ------------------------------------------------------------------ 날짜·금액
@@ -167,6 +179,41 @@ def parse_date(text: str) -> Parsed | None:
     return None
 
 
+def parse_date_upcoming(text: str, today: date | None = None) -> Parsed | None:
+    """연도 없는 날짜('10월 20일', 'Oct 20', '20 Oct') → 오늘 이후 가장 가까운 날 (화물 준비일 전용, 확신도 0.8).
+
+    '10/20' 같은 숫자 표기는 월/일 순서가 나라마다 달라 받지 않는다.
+    """
+    full = parse_date(text)
+    if full:
+        return full
+    from datetime import datetime, timedelta, timezone
+
+    today = today or datetime.now(timezone(timedelta(hours=9))).date()
+    t = clean(text)
+    m = re.search(r"(\d{1,2})\s*월\s*(\d{1,2})\s*일", t)
+    month_day = (int(m[1]), int(m[2]), m[0]) if m else None
+    if not month_day:
+        m = re.search(r"([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?![\d,])", t)
+        if m and m[1].lower() in _MONTHS:
+            month_day = (_MONTHS[m[1].lower()], int(m[2]), m[0])
+    if not month_day:
+        m = re.search(r"(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3})[a-z]*(?!\s*,?\s*20\d{2})", t)
+        if m and m[2].lower() in _MONTHS:
+            month_day = (_MONTHS[m[2].lower()], int(m[1]), m[0])
+    if not month_day:
+        return None
+    month, day, raw = month_day
+    for year in (today.year, today.year + 1):
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            return None
+        if candidate >= today - timedelta(days=7):  # 막 지난 날짜는 올해로 두고 검증에서 '지난 날짜'로 묻는다
+            return Parsed(candidate.isoformat(), 0.8, raw)
+    return None
+
+
 _CCY_WORDS = {"USD": ("usd", "us$", "u$", "$", "달러", "미화", "불"), "KRW": ("krw", "₩", "원", "won"),
               "EUR": ("eur", "€", "유로"), "JPY": ("jpy", "¥", "엔"), "CNY": ("cny", "rmb", "위안")}
 _CCY_TOKEN = _unit_pattern({w for ws in _CCY_WORDS.values() for w in ws})
@@ -188,6 +235,17 @@ def parse_money(text: str) -> Parsed | None:
     return None
 
 
+def parse_currency(text: str) -> Parsed | None:
+    """통화만 적힌 값: 'USD', '미화', '달러', 'US$', 'SGD' → 통화 코드."""
+    t = clean(text).strip().upper().rstrip(".")
+    if t.lower() in _WORD_TO_CCY:
+        return Parsed(_WORD_TO_CCY[t.lower()], 1.0, text)
+    if re.fullmatch(r"[A-Z]{3}", t):
+        return Parsed(t, 1.0, text)  # ISO 통화 코드 형식
+    m = re.search(rf"(?<![A-Za-z])({_CCY_TOKEN})(?![A-Za-z])", t, re.I)
+    return Parsed(_WORD_TO_CCY[m[1].lower()], 0.8, text) if m else None
+
+
 # ------------------------------------------------------------------ 코드값
 
 INCOTERMS = ("FOB", "CIF", "DDP", "EXW")  # 6장 코드값
@@ -202,7 +260,10 @@ def find_incoterms(text: str) -> list[str]:
 _CONTAINERS = [
     ("40RF", r"40\s*(?:ft|'|피트|’)?\s*(?:rf|rh|reefer|냉동|냉장)"),  # 냉동·냉장 — 일반(GP)보다 먼저 봐야 한다
     ("20RF", r"20\s*(?:ft|'|피트|’)?\s*(?:rf|rh|reefer|냉동|냉장)"),
-    ("40HQ", r"40\s*(?:ft|'|피트|’)?\s*(?:hq|hc|high\s*cube|하이\s*큐브)"),
+    # 하이큐브는 40ft뿐. 'HC'·'HQ' 단독은 본사(HQ) 등과 헷갈리므로 대수·'컨테이너'가 바로 붙을 때만
+    ("40HQ", r"(?:40\s*(?:ft|'|피트|’)?\s*(?:hq|hc|high\s*cube|하이\s*큐브)"
+             r"|(?<![a-z가-힣])(?:high\s*cube|하이\s*큐브)"
+             r"|(?<![a-z])(?:hq|hc)(?=\s*(?:x|\*)\s*\d|\s*\d{1,2}\s*대|\s*(?:컨테이너|container|cntr)))(?![a-z])"),
     ("20FT GP", r"20\s*(?:ft|'|피트|’)?\s*(?:gp|dc|dv|dry|일반)?(?:\s*(?:컨테이너|container|cntr))?"),
     ("40FT GP", r"40\s*(?:ft|'|피트|’)?\s*(?:gp|dc|dv|dry|일반)?(?:\s*(?:컨테이너|container|cntr))?"),
 ]
@@ -218,7 +279,7 @@ def parse_container(text: str) -> Parsed | None:
         m = re.search(rf"(?<!\d){pattern}", cleaned, re.I)
         if m:
             # '20'만 있고 ft/피트/GP 등 표시가 없으면 컨테이너가 아닐 수 있다
-            explicit = re.search(r"ft|'|피트|’|gp|dc|dv|dry|hq|hc|cube|rf|rh|reefer|냉동|냉장|컨테이너|container|cntr", m[0], re.I)
+            explicit = re.search(r"ft|'|피트|’|gp|dc|dv|dry|hq|hc|cube|큐브|rf|rh|reefer|냉동|냉장|컨테이너|container|cntr", m[0], re.I)
             if explicit:
                 return Parsed(code, 1.0, m[0])
     return None
@@ -282,6 +343,22 @@ def port_code(text: str | None) -> str | None:
         elif re.search(rf"(?<![A-Z]){re.escape(name)}(?![A-Z])" if name.isascii() else re.escape(name), upper):
             found.add(code)
     return found.pop() if len(found) == 1 else None
+
+
+def ports_in(text: str) -> set[str]:
+    """글 안에 이름이 나온 항구 코드 전부 ('선적항: 부산 / 도착항: 싱가포르' → {KRPUS, SGSIN})."""
+    upper = re.sub(r"\s+", " ", clean(text).upper())
+    found = set()
+    for name, code in _name_index().items():
+        if len(name) <= 2 and name.isascii():
+            if re.search(rf"(?<![A-Z]){re.escape(name)}(?![A-Z])", upper):
+                found.add(code)
+        elif re.search(rf"(?<![A-Z]){re.escape(name)}(?![A-Z])" if name.isascii() else re.escape(name), upper):
+            found.add(code)
+    for token in re.findall(r"(?<![A-Z])[A-Z]{2}[A-Z2-9]{3}(?![A-Z])", upper):
+        if token in ports():
+            found.add(token)
+    return found
 
 
 def port_candidates(text: str | None, limit: int = 3) -> list[str]:

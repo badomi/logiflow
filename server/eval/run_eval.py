@@ -80,18 +80,20 @@ def same(got, expected) -> bool:
     return engine._same(got, expected)
 
 
-def evaluate(llm=None, model: str | None = None, cases: list[dict] | None = None) -> dict:
+def evaluate(llm=None, model: str | None = None, cases: list[dict] | None = None, scope: str = "all") -> dict:
     cases_in = cases if cases is not None else all_cases()
     per_field = {f: {"filled": 0, "correct": 0, "expected": 0} for f in FIELDS}
-    errors, cases, times, multi_ok = [], [], [], 0
+    errors, cases, times, multi_ok, unparsed = [], [], [], 0, []
     for case in cases_in:
-        result = engine.run(load_mails(case), llm=llm, model_name=model)
+        result = engine.run(load_mails(case), llm=llm, model_name=model, scope=scope)
         times.append(result["elapsedMs"])
         expected = case["expected"]
         c_filled = c_correct = 0
         for f in FIELDS:
             want = expected.get(f)
             got = result["fields"][f]
+            if got.get("reason") == "UNPARSED":
+                unparsed.append({"case": case["id"], "field": f, "evidence": got["evidence"], "expected": want})
             if want is not None:
                 per_field[f]["expected"] += 1
             if got["status"] != "filled":
@@ -115,7 +117,7 @@ def evaluate(llm=None, model: str | None = None, cases: list[dict] | None = None
     return {
         "precision": correct / filled if filled else 0.0, "coverage": correct / expected if expected else 0.0,
         "filled": filled, "correct": correct, "expectedTotal": expected, "perField": per_field, "cases": cases,
-        "errors": errors, "multiAccuracy": multi_ok / len(cases_in), "caseCount": len(cases_in),
+        "errors": errors, "unparsed": unparsed, "multiAccuracy": multi_ok / len(cases_in), "caseCount": len(cases_in),
         "msMedian": statistics.median(times), "msMax": max(times),
     }
 
@@ -149,6 +151,13 @@ def report(r: dict, mode: str, model: str | None) -> str:
         for e in r["errors"]:
             lines.append(f"| {e['case']} | {e['field']} | {e['got']} | {e['expected']} | {e['method']} {e['score']} | "
                          f"{(e['evidence'] or '').replace('|', '/')[:60]} |")
+    lines += ["", "## 찾았지만 읽지 못한 값 (저장 안 함 → 원문을 짚어 확인 질문, 사전 보강 후보)"]
+    if not r["unparsed"]:
+        lines.append("없음")
+    else:
+        lines += ["| 케이스 | 필드 | 원문 | 정답 |", "|---|---|---|---|"]
+        for u in r["unparsed"]:
+            lines.append(f"| {u['case']} | {u['field']} | {(u['evidence'] or '').replace('|', '/')[:60]} | {u['expected']} |")
     return "\n".join(lines) + "\n"
 
 
@@ -157,6 +166,7 @@ def main() -> None:
     parser.add_argument("--mode", choices=["rules", "hybrid"], default="rules")
     parser.add_argument("--model", help="Ollama 모델 이름 (기본: .env LLM_MODEL)")
     parser.add_argument("--url", help="Ollama 주소 (기본: .env LLM_URL)")
+    parser.add_argument("--scope", choices=["all", "missing"], help="LLM이 읽을 범위 (기본: .env LLM_SCOPE)")
     args = parser.parse_args()
 
     llm, model = None, None
@@ -167,8 +177,11 @@ def main() -> None:
         model = args.model or settings.llm_model
         llm = OllamaClient(url=args.url, model=model)
 
-    result = evaluate(llm, model)
-    text = report(result, args.mode, model)
+    from app.config import settings as _s
+
+    scope = args.scope or _s.llm_scope
+    result = evaluate(llm, model, scope=scope)
+    text = report(result, args.mode + (f"·{scope}" if llm else ""), model)
     REPORTS.mkdir(exist_ok=True)
     out = REPORTS / f"{datetime.now():%Y%m%d-%H%M}_{args.mode}{'_' + model.replace(':', '-') if model else ''}.md"
     out.write_text(text, encoding="utf-8")

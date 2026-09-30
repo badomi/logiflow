@@ -172,9 +172,8 @@ def test_hallucinated_llm_value_is_dropped(client, connect):
     case = create(client, eml("01_lcl_request.eml"))
     fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
     assert fields["paymentTerm"]["value"] is None  # 근거가 원문에 없어 버림 (FR-202 정밀도 우선)
-    asked = case["extraction"]["result"]["llm"]["asked"]
-    assert "paymentTerm" in asked and "commodity" not in asked  # 룰이 찾은 품목은 묻지 않는다 (속도)
-    assert fields["commodity"]["method"] == "rule"
+    assert "commodity" in case["extraction"]["result"]["llm"]["asked"]  # LLM 중심: 모든 항목을 묻는다
+    assert fields["commodity"]["method"] == "rule+llm"  # 규칙·LLM이 같은 값 → 점수 가산
 
 
 def test_rule_llm_conflict_goes_to_review(client, connect):
@@ -273,7 +272,8 @@ def test_rerun_keeps_manual_fields_and_blocks_double_click(client, connect, sess
 # ------------------------------------------------------------------ LLM에게 빈 칸만 묻기 (CPU 속도, NFR-02)
 
 
-def test_llm_not_called_when_rules_find_everything(client, connect):
+def test_llm_not_called_when_rules_find_everything(client, connect, monkeypatch):
+    monkeypatch.setattr(settings, "llm_scope", "missing")  # 느린 PC용: 빈 칸만 LLM
     llm = FakeLlm({})
     connect(llm, mode="hybrid")
     case = create(client, text_mail(FULL_LCL))
@@ -281,16 +281,21 @@ def test_llm_not_called_when_rules_find_everything(client, connect):
     assert case["extraction"]["result"]["llm"]["skipped"] == "규칙으로 모두 찾음"
 
 
-def test_reply_prose_correction_is_asked_again(client, connect):
-    """룰이 찾은 값이라도 회신이 그 항목을 문장으로 언급하면 LLM에게 다시 묻는다 (평가 세트 V06 유형)."""
-    llm = FakeLlm({"grossWeight": {"value": "650kg", "quote": "총중량은 650kg로 정정합니다."}})
+def test_reply_prose_correction(client, connect, monkeypatch):
+    monkeypatch.setattr(settings, "llm_scope", "missing")
+    """회신에서 문장으로 고친 값: 룰이 읽으면 룰로, 룰이 못 읽는데 그 항목 이야기가 나오면 LLM에게 다시 묻는다."""
+    llm = FakeLlm({})
     connect(llm, mode="hybrid")
-    case_id = create(client, text_mail(FULL_LCL.replace("결제조건: T/T 30% Advance\n", "")))["caseId"]
+    base = FULL_LCL.replace("결제조건: T/T 30% Advance\n", "")
+    case_id = create(client, text_mail(base))["caseId"]
     reply(client, case_id, text_mail("총중량은 650kg로 정정합니다.\n결제조건: T/T 30% Advance", subject=f"RE: [{case_id}]"))
-    case = client.get(f"/api/cases/{case_id}").json()
-    assert "grossWeight" in case["extraction"]["result"]["llm"]["asked"]
     fields = {f["field"]: f for f in client.get(f"/api/cases/{case_id}/fields").json()}
-    assert fields["grossWeightKg"]["value"] == 650.0 and "메일 2" in fields["grossWeightKg"]["origin"]
+    assert fields["grossWeightKg"]["value"] == 650.0 and "메일 2" in fields["grossWeightKg"]["origin"]  # 룰이 직접
+
+    case_id = create(client, text_mail(base, subject="다른 요청"))["caseId"]
+    reply(client, case_id, text_mail("총중량은 확인 후 다시 알려드리겠습니다.\n결제조건: T/T", subject=f"RE: [{case_id}]"))
+    asked = client.get(f"/api/cases/{case_id}").json()["extraction"]["result"]["llm"]["asked"]
+    assert "grossWeight" in asked  # 룰이 값을 못 읽은 언급 → LLM 확인
 
 
 # ------------------------------------------------------------------ 월간 운임표 테스트 요율 (samples.md 3번)
@@ -400,3 +405,175 @@ def test_validation_rules_are_data(client, connect, monkeypatch):
     monkeypatch.setattr(validation, "rules", lambda: custom)
     questions = "\n".join(create(client, eml("01_lcl_request.eml"))["extraction"]["validation"]["questions"])
     assert "출고 예정일을 알려주세요 (테스트 문구)" in questions and "결제 조건" not in questions
+
+
+def test_busan_singapore_lcl_test_rate(client, connect):
+    case = create(client, text_mail(FULL_LCL.replace("인천", "부산").replace("시드니", "싱가포르")))
+    assert case["status"] == "계산완료", case["extraction"]["validation"]
+    assert case["extraction"]["validation"]["quote"]["totals"] == {"USD": 500.0, "KRW": 140203.0}
+
+
+def test_invoice_questions_not_duplicated_and_split_reply_merges(client, connect):
+    case = create(client, eml("01_lcl_request.eml"))
+    questions = case["extraction"]["validation"]["questions"]
+    invoice = [q for q in questions if "인보이스" in q]
+    assert len(invoice) == 1 and "금액과 통화" in invoice[0]  # 통화 질문이 따로 또 나가지 않는다
+
+    after = reply(client, case["caseId"], text_mail("인보이스 금액: 8,500\n통화: USD", subject=f"RE: [{case['caseId']}]"))
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    assert fields["invoiceValue"]["value"] == 8500 and fields["ccy"]["value"] == "USD"
+    assert not [q for q in after["extraction"]["validation"]["questions"] if "인보이스" in q]
+
+
+def test_currency_only_question_when_amount_known(client, connect):
+    case = create(client, text_mail(FULL_LCL.replace("USD 3,000", "3,000")))
+    invoice = [q for q in case["extraction"]["validation"]["questions"] if "인보이스" in q]
+    assert len(invoice) == 1 and "통화" in invoice[0] and "금액과" not in invoice[0]
+
+
+def test_reply_answering_by_question_numbers(client, connect):
+    """보완 요청을 보낸 뒤 화주가 번호에 맞춰 값만 적어 회신해도 채워진다."""
+    case = create(client, eml("01_lcl_request.eml"))
+    draft = client.post(f"/api/cases/{case['caseId']}/drafts/supplement", json={}).json()
+    questions = case["extraction"]["validation"]["questions"]
+    assert draft["htmlBody"].count("<li>") == len(questions)
+    order = {"선적항": "인천", "화물 준비일": "2026-10-20", "인보이스": "USD 8,500", "결제 조건": "T/T 30% Advance",
+             "조건을": "CIF", "부피": "0.38CBM"}
+    lines = []
+    for n, q in enumerate(questions, start=1):
+        answer = next((a for key, a in order.items() if key in q), "확인 중")
+        lines.append(f"{n}. {answer}")
+    after = reply(client, case["caseId"], text_mail("\n".join(lines), subject=f"RE: [{case['caseId']}] 보완"))
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    assert fields["pol"]["value"] == "KRINC" and fields["cargoReadyDate"]["value"] == "2026-10-20"
+    assert fields["invoiceValue"]["value"] == 8500 and fields["paymentTerm"]["value"] == "T/T 30% Advance"
+    assert after["status"] == "계산완료", after["extraction"]["validation"]
+
+
+def test_unreadable_value_is_asked_with_original_text(client, connect):
+    body = FULL_LCL.replace("예상 총중량: 500kg", "예상 총중량: 오백 킬로 정도")
+    case = create(client, text_mail(body))
+    q = [x for x in case["extraction"]["validation"]["questions"] if "총중량" in x]
+    assert len(q) == 1 and "「예상 총중량: 오백 킬로 정도」" in q[0] and "500kg 형식" in q[0]
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    assert fields["grossWeightKg"]["status"] == "review" and fields["grossWeightKg"]["candidate"] == "오백 킬로 정도"
+
+    report = client.get("/api/extraction/review-report").json()
+    assert report["unparsed"]["grossWeightKg"]["examples"][0]["case"] == case["caseId"]  # 놓친 표현 모아 보기
+
+
+def test_unsupported_incoterms_gets_a_proper_question(client, connect):
+    case = create(client, text_mail(FULL_LCL.replace("조건: CIF", "조건: FCA")))
+    q = [x for x in case["extraction"]["validation"]["questions"] if "FCA" in x]
+    assert len(q) == 1 and "FOB·CIF·DDP·EXW" in q[0]
+
+
+
+# ------------------------------------------------------------------ LLM 중심 추출 (LLM이 모든 항목, 규칙은 교차 확인)
+
+
+class LineLlm:
+    """실제 LLM처럼 '정리된 값 + 줄 번호'로 답하는 가짜 LLM. answers = {항목: (값, 근거 줄에 든 글자)}"""
+
+    def __init__(self, answers: dict, multi=False):
+        self.answers, self.multi, self.prompts = answers, multi, []
+
+    def complete_json(self, system, user, schema):
+        self.prompts.append(user)
+        lines = {int(m[1]): m[2] for m in __import__("re").finditer(r"^L(\d+): (.*)$", user, __import__("re").M)}
+        fields = {}
+        for key, (value, where) in self.answers.items():
+            hit = [n for n, text in lines.items() if any(w in text for w in where.split("|"))]
+            if hit:
+                fields[key] = {"v": value, "l": hit[-1:] if "|" not in where else hit}
+        return {"fields": fields, "multipleItems": self.multi}
+
+
+PROSE = ("안녕하세요, 그린오피스 최서연입니다.\n인천에서 시드니로 LCL로 보낼 노트가 열 박스 있어요.\n"
+         "한 박스가 가로 310 세로 450 높이 270mm이고 무게는 다 합쳐 오백 킬로 정도예요.\n"
+         "10월 20일쯤 준비되고 CIF로 부탁드려요.\n금액은 3,000이고 통화는 USD입니다.\n결제는 티티 30% 선결제로 할게요.")
+
+
+def test_llm_centric_reads_free_prose(client, connect):
+    llm = LineLlm({
+        "commodity": ("노트", "노트가"), "quantity": ("10 CTNS", "열 박스"),
+        "boxDimensions": ("310 x 450 x 270 mm", "가로"), "grossWeight": ("500 kg", "오백"),
+        "portOfLoading": ("인천", "인천에서"), "portOfDischarge": ("시드니", "시드니로"),
+        "cargoReadyDate": ("2026-10-20", "10월 20일"), "incoterms": ("CIF", "CIF로"), "container": ("LCL", "LCL"),
+        "invoiceValue": ("3000 USD", "금액은"), "paymentTerm": ("T/T 30% Advance", "티티"),
+    })
+    connect(llm, mode="hybrid")
+    case = create(client, text_mail(PROSE))
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    assert "직전 질문" not in llm.prompts[0] and "L2:" in llm.prompts[0]
+    for name, value in [("commodity", "노트"), ("qty", 10), ("boxL", 310), ("grossWeightKg", 500.0), ("pol", "KRINC"),
+                        ("pod", "AUSYD"), ("incoterms", "CIF"), ("containerType", "LCL"), ("invoiceValue", 3000),
+                        ("ccy", "USD")]:
+        assert fields[name]["value"] == value, name
+    assert fields["paymentTerm"]["value"] == "T/T 30% Advance"  # '티티 30% 선결제'를 정리 (원문에 결제 방식 단어 있음)
+    assert fields["cargoReadyDate"]["value"] == "2026-10-20" and fields["cargoReadyDate"]["score"] < 1.0
+
+
+def test_llm_reads_numbered_reply_with_previous_questions(client, connect):
+    llm = LineLlm({"portOfLoading": ("인천", "1. 인천"), "cargoReadyDate": ("2026-10-20", "2. 2026"),
+                   "paymentTerm": ("T/T", "3. T/T")})
+    connect(llm, mode="hybrid")
+    case_id = create(client, text_mail(FULL_LCL.replace("선적항: 인천\n", "").replace("화물 준비일: 2026-10-20\n", "")
+                                       .replace("결제조건: T/T 30% Advance\n", "")))["caseId"]
+    client.post(f"/api/cases/{case_id}/drafts/supplement", json={})
+    reply(client, case_id, text_mail("1. 인천\n2. 2026-10-20\n3. T/T", subject=f"RE: [{case_id}]"))
+    assert "직전 질문" in llm.prompts[-1] and "1) 선적항" in llm.prompts[-1]
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case_id}/fields").json()}
+    assert (fields["pol"]["value"], fields["cargoReadyDate"]["value"], fields["paymentTerm"]["value"]) == \
+        ("KRINC", "2026-10-20", "T/T")
+
+
+def test_small_model_mistakes_are_not_saved(client, connect):
+    llm = LineLlm({"portOfLoading": ("인천", "픽업지"),  # 픽업지를 선적항으로 착각
+                   "grossWeight": ("50 kg", "총중량")})  # 숫자를 잘못 옮김
+    connect(llm, mode="hybrid")
+    case = create(client, eml("01_lcl_request.eml"))
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    assert fields["pol"]["value"] is None  # 규칙이 '픽업지'로 읽은 줄 → 선적항으로 저장 안 함
+    assert fields["grossWeightKg"]["value"] == 500.0  # 원문 숫자와 다른 LLM 값은 버리고 규칙 값 유지
+
+
+
+def test_llm_payment_term_needs_payment_word_in_source(client, connect):
+    llm = LineLlm({"paymentTerm": ("L/C 30 days", "30일")})  # 원문엔 결제 방식이 없는데 L/C로 지어냄
+    connect(llm, mode="hybrid")
+    case = create(client, text_mail(FULL_LCL.replace("결제조건: T/T 30% Advance", "대금은 30일 후에 드려요")))
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    assert fields["paymentTerm"]["value"] is None and fields["paymentTerm"]["status"] == "review"
+
+
+def test_llm_wrong_line_for_invoice_is_not_asked_to_customer(client, connect):
+    """실제 사례: 작은 모델이 '예상 총중량: 약 360kg' 줄을 인보이스 금액으로 짚음 → 화주 질문에 그 줄이 나오면 안 된다."""
+    body = ("품목: 문구류\n박스 수량: 8박스\n박스 1개 규격: 310 × 450 × 270mm\n예상 총중량: 약 360kg\n선적항: 인천\n"
+            "도착항: 시드니\n조건: CIF\n선적방식: LCL")
+    llm = LineLlm({"invoiceValue": ("360 kg", "총중량"), "grossWeight": ("360 kg", "총중량")})
+    connect(llm, mode="hybrid")
+    case = create(client, text_mail(body))
+    questions = case["extraction"]["validation"]["questions"]
+    invoice = [q for q in questions if "인보이스" in q]
+    assert len(invoice) == 1 and "총중량" not in invoice[0] and "금액과 통화" in invoice[0]
+    assert not any("「" in q for q in questions)  # LLM이 짚은 줄을 인용하는 질문 없음
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    assert fields["invoiceValue"]["status"] == "missing" and fields["grossWeightKg"]["value"] == 360.0
+
+
+def test_llm_unreadable_value_is_for_staff_not_quoted_to_customer(client, connect):
+    llm = LineLlm({"grossWeight": ("반", "무게는")})
+    connect(llm, mode="hybrid")
+    case = create(client, text_mail(FULL_LCL.replace("예상 총중량: 500kg", "무게는 대략 반 정도")))
+    q = [x for x in case["extraction"]["validation"]["questions"] if "총중량" in x]
+    assert q and "「" not in q[0]  # 일반 질문
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    assert fields["grossWeightKg"]["status"] == "review" and fields["grossWeightKg"]["candidate"] == "반"  # 담당자에겐 보임
+
+
+def test_question_particles_follow_final_consonant():
+    from app.validation import josa
+
+    assert ("총중량" + josa("총중량", "을", "를"), "포장 형태" + josa("포장 형태", "을", "를")) == ("총중량을", "포장 형태를")
+    assert "360kg" + josa("360kg", "이라고", "라고") == "360kg이라고"

@@ -38,6 +38,14 @@ INCOTERMS = ("FOB", "CIF", "DDP", "EXW")
 _UN_NUMBER = re.compile(r"\bUN\s?\d{4}\b", re.I)
 
 
+def josa(word: str, with_final: str, without_final: str) -> str:
+    """받침에 맞는 조사: 총중량+을, 포장 형태+를. 한글이 아닌 글자로 끝나면(360kg) 받침 있는 쪽."""
+    last = word.strip()[-1:] if word.strip() else ""
+    if "가" <= last <= "힣":
+        return with_final if (ord(last) - 0xAC00) % 28 else without_final
+    return with_final
+
+
 def today_kst() -> date:
     return datetime.now(KST).date()
 
@@ -58,15 +66,23 @@ def check(session: Session, qi: QuoteInput, notes: list[dict] | None = None, tod
           review: dict[str, str] | None = None, container_count: int | None = None) -> list[dict]:
     """6장 제약으로 판정한 문제 목록. question이 있는 것만 화주 문항이 되고, 나머지는 담당자 참고용.
 
-    review: 추출은 됐지만 확신이 낮아 저장하지 않은 필드 → {필드: 근거 원문}. 이런 필드는 '맞는지 확인' 문항으로 묻는다.
+    review: 추출은 됐지만 저장하지 않은 필드 → {필드: {"evidence": 근거 원문, "reason": 사유}}.
+      확신이 낮으면 '맞는지 확인', 해석하지 못했으면(UNPARSED) 원문을 짚어 정확한 형식으로 다시 묻는다.
     """
     today = today or today_kst()
     notes = notes or []
     review = review or {}
 
     def confirm(field: str) -> str:
-        return (f"{rules()["labels"][field]}을(를) 「{review[field]}」 기준으로 이해했습니다. 맞는지 확인 부탁드립니다. "
-                f"(Please confirm: {review[field]})")
+        info = review[field]
+        label, ev = rules()["labels"][field], info["evidence"]
+        if info.get("reason") == "UNPARSED":
+            hint = rules().get("formatHints", {}).get(field)
+            example = f" ({hint} 형식)" if hint else ""
+            return (f"{label}{josa(label, '을', '를')} 「{ev}」{josa(ev, '이라고', '라고')} 적어 주셨는데 정확히 읽지 못했습니다. "
+                    f"다시 알려 주세요{example}. (Please re-confirm: {ev})")
+        return (f"{label}{josa(label, '을', '를')} 「{ev}」 기준으로 이해했습니다. 맞는지 확인 부탁드립니다. "
+                f"(Please confirm: {ev})")
     issues: list[dict] = []
 
     def add(field: str, code: str, message: str, ask: str | None = None, **extra):
@@ -82,14 +98,25 @@ def check(session: Session, qi: QuoteInput, notes: list[dict] | None = None, tod
             add(field, "MULTIPLE_INCOTERMS", f"조건이 여러 개({options})",
                 f"견적 조건을 {options} 중 하나로 정해 주세요. 두 조건 모두 필요하시면 말씀해 주세요. "
                 f"(Please confirm one Incoterm: {options})")
+        elif (field, "UNSUPPORTED_INCOTERMS") in note_codes:
+            term = note_codes[(field, "UNSUPPORTED_INCOTERMS")]["value"]
+            add(field, "UNSUPPORTED_INCOTERMS", f"지원하지 않는 조건: {term}",
+                f"요청하신 {term} 조건은 현재 FOB·CIF·DDP·EXW 기준으로 견적드리고 있습니다. 어느 조건으로 견적할지 알려 주세요. "
+                f"(We currently quote on FOB/CIF/DDP/EXW. Which term should we use instead of {term}?)")
         elif field in review:
-            add(field, "REVIEW", "추출 신뢰도 낮음 — 검토 필요 (FR-209)", confirm(field))
+            code = "UNPARSED" if review[field].get("reason") == "UNPARSED" else "REVIEW"
+            add(field, code, "값을 찾았지만 해석 못 함" if code == "UNPARSED" else "추출 신뢰도 낮음 — 검토 필요 (FR-209)",
+                confirm(field))
         elif (field, "PORT_UNMAPPED") in note_codes:
             note = note_codes[(field, "PORT_UNMAPPED")]
             add(field, "PORT_UNMAPPED", f"'{note['value']}' UN/LOCODE 매핑 실패", rules()["questions"][field],
                 candidates=note.get("candidates") or port_candidates(note["value"]))
         else:
             add(field, "MISSING", "누락", rules()["questions"][field])
+
+    # 금액과 통화가 둘 다 없으면 '금액과 통화' 질문 하나만 (통화 질문이 따로 또 나가지 않게)
+    if qi.invoiceValue is None and qi.ccy is None:
+        issues[:] = [i for i in issues if i["field"] != "ccy"]
 
     has_box = all(getattr(qi, k) is not None for k in ("boxL", "boxW", "boxH"))
     if not has_box and qi.totalCbm is None:
@@ -142,13 +169,15 @@ def check(session: Session, qi: QuoteInput, notes: list[dict] | None = None, tod
     return issues
 
 
-def review_evidence(extraction: dict) -> dict[str, str]:
-    """추출 결과에서 '검토 필요'(값은 있으나 임계치 미만) 필드의 근거 원문. 다품목으로 보류된 값은 제외."""
-    out: dict[str, str] = {}
+def review_evidence(extraction: dict) -> dict[str, dict]:
+    """추출 결과에서 '확인 필요'(저장 안 한 값) 필드의 근거 원문과 사유. 다품목으로 보류된 값은 제외."""
+    out: dict[str, dict] = {}
     for name, f in (extraction.get("fields") or {}).items():
+        if f.get("reason") == "UNPARSED" and (f.get("method") or "").startswith("llm"):
+            continue  # LLM이 짚은 줄은 틀릴 수 있다 → 원문 인용 없이 일반 질문으로 (담당자 화면에는 '확인 필요'로 보임)
         if f.get("status") == "review" and f.get("evidence") and f.get("reason") != "MULTIPLE_ITEMS":
             key = "volume" if name in ("boxL", "boxW", "boxH", "totalCbm") else name
-            out.setdefault(key, f["evidence"].strip())
+            out.setdefault(key, {"evidence": f["evidence"].strip(), "reason": f.get("reason")})
     return out
 
 

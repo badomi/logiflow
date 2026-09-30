@@ -68,3 +68,34 @@ def ground(quote: str | None, value: str | None, sources: list[Source]) -> tuple
     if support < 0.5:
         return 0.0, "", -1
     return round(match * support, 3), src.label, src.order
+
+
+# 말로 쓴 수 ('오백', '반 톤', '한 대', 'five hundred') — 값의 숫자가 원문에 없어도 이런 말이 있으면 LLM이 정리한 것으로 본다
+_NUMBER_WORDS = re.compile(
+    r"(?:[일이삼사오육칠팔구]?[십백천만])+|반\s*(?:톤|t)|(?:한|두|세|네|다섯)\s*(?:대|개|박스|팔레트)|"
+    r"\b(?:half|one|two|three|four|five|six|seven|eight|nine|ten|hundred|thousand)\b", re.I)
+
+
+def support_lines(value: str, lines: list, index: list) -> tuple[float, object, str]:
+    """LLM이 준 줄 번호로 근거를 찾고, 값이 그 줄에서 나왔는지 본다 → (지지도, 출처, 근거 원문).
+
+    - 줄 번호가 없거나 범위 밖이면 0 (지어낸 근거)
+    - 값의 숫자가 근거 줄에 모두 있으면 1.0, 말로 쓴 수가 있으면 0.8, 숫자가 다르면 0
+    - 숫자 없는 값(품목·이름 등)은 글자가 겹치는 비율
+    뜻이 같은지(하이큐브 = 40HQ, 싱가포르 = Singapore)는 llm_stage가 규칙 해석기로 한 번 더 본다.
+    """
+    valid = [int(n) for n in lines if isinstance(n, (int, float)) and 1 <= int(n) <= len(index)]
+    if not valid:
+        return 0.0, None, ""
+    picked = [index[n - 1] for n in dict.fromkeys(valid)]
+    evidence = " / ".join(text for _, text in picked)
+    src = max((s for s, _ in picked), key=lambda s: s.order)
+    numbers = _digits(value)
+    if numbers:
+        quoted = set(_digits(evidence))
+        if all(n in quoted for n in numbers):
+            return 1.0, src, evidence
+        if _NUMBER_WORDS.search(clean(evidence)):
+            return 0.8, src, evidence
+        return 0.0, src, evidence
+    return value_supported(value, evidence), src, evidence
