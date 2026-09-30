@@ -310,3 +310,65 @@ def test_more_common_expressions(body, field, value):
 def test_hq_hc_alone_is_not_a_container():
     for text in ("본사(HQ)로 보내 주세요", "CHC 회사 제품", "HC"):
         assert run_rules(text)["containerType"]["status"] == "missing", text
+
+
+def tiny_pdf(lines: list[str]) -> bytes:
+    """글자가 들어 있는 최소 PDF (영문·숫자) — 외부 라이브러리 없이 테스트용으로 만든다."""
+    text = "BT /F1 12 Tf 72 720 Td " + " 0 -16 Td ".join(f"({ln}) Tj" for ln in lines) + " ET"
+    objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        f"<< /Length {len(text)} >>\nstream\n{text}\nendstream",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out, offsets = b"%PDF-1.4\n", []
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n{obj}\nendobj\n".encode()
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+    out += "".join(f"{o:010d} 00000 n \n" for o in offsets).encode()
+    out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode()
+    return out
+
+
+def test_pdf_packing_list_text_is_extracted():
+    pdf = tiny_pdf(["PACKING LIST", "Package: 12 CTNS", "Carton Size: 60 x 40 x 35 cm", "Gross Weight: 240 KGS"])
+    text = attachments.extract_text("packing_list.pdf", pdf)
+    assert "Gross Weight: 240 KGS" in text
+    result = engine.run([MailText("견적", "", "a@b.co", "첨부 패킹리스트 참고 부탁드립니다.", attachments=[("packing_list.pdf", text)])])
+    f = result["fields"]
+    assert f["grossWeightKg"]["value"] == 240 and f["qty"]["value"] == 12 and f["boxL"]["value"] == 600
+    assert f["grossWeightKg"]["origin"] == "메일 1 · 첨부 packing_list.pdf"
+
+
+def test_broken_or_unsupported_attachment_does_not_break_extraction():
+    assert attachments.extract_text("broken.pdf", b"%PDF-1.4 garbage") == ""
+    assert attachments.extract_text("photo.jpg", b"\xff\xd8\xff") == ""  # 이미지·스캔 PDF(OCR)는 대상 아님
+
+
+# ---------------------------------------------------------------- 첨부 표 (패킹리스트·인보이스는 대부분 표)
+
+
+def test_vertical_table_with_english_in_parentheses():
+    lines = attachments.table_lines([["품목", "(Commodity)", "전자부품"], ["총중량", "(Gross Weight)", "240 KGS"]])
+    assert lines == ["품목 (Commodity)\t전자부품", "총중량 (Gross Weight)\t240 KGS"]
+
+
+def test_horizontal_table_pairs_header_with_total_row():
+    rows = [["No", "Description", "Q'ty", "CBM", "G.W"], ["1", "Parts A", "8 CTNS", "0.6", "160 KGS"],
+            ["2", "Parts B", "4 CTNS", "0.408", "80 KGS"], ["TOTAL", "12 CTNS", "1.008", "240 KGS"]]
+    lines = attachments.table_lines(rows)
+    assert {"Q'ty\t12 CTNS", "CBM\t1.008", "G.W\t240 KGS"} <= set(lines)
+    assert not any(line.startswith("Description\t") for line in lines)  # 'TOTAL'을 품목명으로 짝짓지 않음
+
+
+def test_horizontal_table_without_total_and_many_rows_is_not_paired():
+    rows = [["Description", "Q'ty", "G.W"], ["Parts A", "8 CTNS", "160 KGS"], ["Parts B", "4 CTNS", "80 KGS"]]
+    assert not any(line.startswith("G.W\t") for line in attachments.table_lines(rows))  # 어느 줄인지 모름 → 짝짓지 않음
+
+
+def test_label_line_followed_by_another_label_is_not_a_value():
+    fields = run_rules("품목 (Commodity)\n수량 (Package)\n12 CTNS")
+    assert fields["commodity"]["status"] == "missing"  # '수량 (Package)'를 품목으로 읽지 않는다

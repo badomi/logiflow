@@ -596,3 +596,34 @@ def test_reply_merge_quirks_from_real_test(client, connect):
     assert fields["contactName"]["value"] == "이지은 과장"  # 서명 이름이 회신 계정 이름보다 우선
     assert "pickupLocation" not in case["extraction"]["result"]["llm"]["asked"]
     assert case["status"] == "계산완료"
+
+
+def test_attachment_values_flow_through_outlook_eml(client, connect):
+    """패널이 보내는 .eml(첨부 포함) → 서버가 첨부 저장 → 추출이 첨부(PDF·XLSX)에서 값을 읽는다 (FR-204)."""
+    import io
+    from email.message import EmailMessage
+
+    from openpyxl import Workbook
+
+    from .test_extraction import tiny_pdf
+
+    msg = EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = "부산-싱가포르 LCL 견적 (패킹리스트 첨부)", "buyer@x.co", "quote@leona.example.com"
+    msg["Message-ID"] = "<attach-test@x.co>"
+    msg.set_content("품목: 전자부품\n선적항: 부산\n도착항: 싱가포르\n조건: CIF\n선적방식: LCL\n화물 준비일: 2026-10-25\n"
+                    "결제조건: T/T\n첨부 참고 부탁드립니다.")
+    msg.add_attachment(tiny_pdf(["Package: 12 CTNS", "Carton Size: 60 x 40 x 35 cm", "Gross Weight: 240 KGS"]),
+                       maintype="application", subtype="pdf", filename="packing_list.pdf")
+    wb = Workbook()
+    wb.active.append(["Invoice Value", "USD 6,000"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    msg.add_attachment(buf.getvalue(), maintype="application",
+                       subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename="invoice.xlsx")
+
+    body = {"emlBase64": base64.b64encode(msg.as_bytes()).decode(), "actor": "quote@leona.example.com"}
+    case = create(client, body)
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    assert fields["grossWeightKg"]["value"] == 240.0 and "첨부 packing_list.pdf" in fields["grossWeightKg"]["origin"]
+    assert fields["invoiceValue"]["value"] == 6000 and "첨부 invoice.xlsx" in fields["invoiceValue"]["origin"]
+    assert case["status"] == "계산완료"  # 본문 + 첨부 두 개로 견적까지

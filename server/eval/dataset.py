@@ -282,6 +282,184 @@ K Furniture Inc."""}],
 ]
 
 
+# ---------------------------------------------------------------- 부산 기준 기능 테스트 메일 (담당자 테스트용과 같은 내용)
+# 이 메일들도 룰을 만든 사람이 썼으므로 '블라인드'는 아니다. MUST-SHIP ① 시연용 샘플 수(20건)를 채우고 LLM 효과를 보는 용도.
+_T_LCL = {"commodity": "스프링노트", "qty": 10, "qtyUnit": "CTNS", "packing": "Carton", "boxL": 310, "boxW": 450,
+          "boxH": 270, "totalCbm": 0.38, "pol": "KRPUS", "pod": "SGSIN", "cargoReadyDate": "2026-10-20",
+          "incoterms": "CIF", "containerType": "LCL", "grossWeightKg": 500, "invoiceValue": 3000, "ccy": "USD",
+          "paymentTerm": "T/T 30% Advance", "customerName": "㈜한빛무역", "contactName": "김민수 대리",
+          "contactEmail": "ms.kim@hanbit-trade.co.kr"}
+
+CASES += [
+    {"id": "T01", "desc": "부산→싱가포르 LCL, 정보 모두 있음",
+     "mails": [{"from": ("김민수", "ms.kim@hanbit-trade.co.kr"), "subject": "부산-싱가포르 LCL 해상 견적 요청", "body": """안녕하세요. 아래 조건으로 LCL 견적 부탁드립니다.
+
+품목: 스프링노트
+박스 수량: 10박스
+박스 1개 규격: 310 × 450 × 270mm
+전체 부피: 0.38CBM
+예상 총중량: 500kg
+선적항: 부산
+도착항: 싱가포르
+화물 준비일: 2026-10-20
+조건: CIF
+선적방식: LCL
+인보이스 금액: USD 3,000
+결제조건: T/T 30% Advance
+
+감사합니다.
+김민수 대리
+㈜한빛무역"""}], "expected": _T_LCL},
+
+    {"id": "T02", "desc": "정보 부족 요청 + 보완 질문 번호로만 답한 회신",
+     "asked": ["pol", "cargoReadyDate", "incoterms", "invoiceValue", "paymentTerm"],
+     "mails": [
+         {"from": ("이지은", "jieun.lee@seoulmungu.co.kr"), "subject": "싱가포르행 LCL 견적 문의", "body": """안녕하세요, 서울문구 이지은입니다.
+싱가포르로 보낼 화물 LCL 운임 견적 부탁드립니다.
+
+품목: 문구류(노트)
+박스 수량: 20박스
+박스 규격: 40 x 30 x 25 cm
+총중량: 180kg
+도착항: 싱가포르
+선적방식: LCL
+
+감사합니다.
+이지은 과장
+서울문구 주식회사"""},
+         {"role": "REPLY", "from": ("이지은", "jieun.lee@seoulmungu.co.kr"), "subject": "RE: [LQ-2026-0930-002] 견적 보완 요청",
+          "body": "1. 부산\n2. 2026-10-27\n3. CIF\n4. USD 2,400\n5. T/T 100% Advance"}],
+     "expected": {"commodity": "문구류(노트)", "qty": 20, "qtyUnit": "CTNS", "packing": "Carton", "boxL": 400, "boxW": 300,
+                  "boxH": 250, "pol": "KRPUS", "pod": "SGSIN", "cargoReadyDate": "2026-10-27", "incoterms": "CIF",
+                  "containerType": "LCL", "grossWeightKg": 180, "invoiceValue": 2400, "ccy": "USD",
+                  "paymentTerm": "T/T 100% Advance", "customerName": "서울문구 주식회사", "contactName": "이지은 과장",
+                  "contactEmail": "jieun.lee@seoulmungu.co.kr"}},
+
+    {"id": "T03", "desc": "부산→싱가포르 40HQ 2대 CIF",
+     "mails": [{"from": ("", "buyer@plasticparts.co.kr"), "subject": "[견적요청] 부산 → 싱가포르 40HQ CIF", "body": """품목: 플라스틱 부품
+수량: 1,000박스
+총 부피: 96CBM
+총중량: 20,000kg
+선적항: 부산
+도착항: 싱가포르
+화물 준비일: 2026-11-05
+조건: CIF
+컨테이너: 40HQ 2대
+인보이스 금액: USD 30,000
+결제조건: T/T 30% Advance
+
+감사합니다."""}],
+     "expected": {"commodity": "플라스틱 부품", "qty": 1000, "qtyUnit": "CTNS", "packing": "Carton", "totalCbm": 96,
+                  "pol": "KRPUS", "pod": "SGSIN", "cargoReadyDate": "2026-11-05", "incoterms": "CIF",
+                  "containerType": "40HQ", "grossWeightKg": 20000, "invoiceValue": 30000, "ccy": "USD",
+                  "paymentTerm": "T/T 30% Advance", "contactEmail": "buyer@plasticparts.co.kr"}},
+
+    {"id": "T04", "desc": "부산→포트클랑 40HQ, 대수 없음",
+     "mails": [{"from": ("", "import@furniture.co.kr"), "subject": "부산 → 포트클랑 FCL 견적", "body": """품목: 가구 부품
+수량: 800박스
+총 부피: 100CBM
+총중량: 20,000kg
+선적항: 부산
+도착항: 포트클랑
+화물 준비일: 2026-11-10
+조건: CIF
+컨테이너: 40HQ
+인보이스 금액: USD 40,000
+결제조건: L/C at sight
+
+감사합니다."""}],
+     "expected": {"commodity": "가구 부품", "qty": 800, "qtyUnit": "CTNS", "packing": "Carton", "totalCbm": 100,
+                  "pol": "KRPUS", "pod": "MYPKG", "cargoReadyDate": "2026-11-10", "incoterms": "CIF",
+                  "containerType": "40HQ", "grossWeightKg": 20000, "invoiceValue": 40000, "ccy": "USD",
+                  "paymentTerm": "L/C at sight", "contactEmail": "import@furniture.co.kr"}},
+
+    {"id": "T05", "desc": "부산→상하이 40HQ FOB",
+     "mails": [{"from": ("박준호", "junho.park@daehan-apparel.co.kr"), "subject": "부산 → 상하이 40HQ FOB 견적", "body": """품목: 의류
+수량: 1,000박스
+박스 규격: 460 × 290 × 250mm
+총중량: 4,950kg
+선적항: 부산
+도착항: 상하이
+화물 준비일: 2026-11-10
+조건: FOB
+컨테이너: 40HQ 1대
+인보이스 금액: USD 60,000
+결제조건: L/C at sight
+
+감사합니다.
+박준호 차장
+대한어패럴㈜"""}],
+     "expected": {"commodity": "의류", "qty": 1000, "qtyUnit": "CTNS", "packing": "Carton", "boxL": 460, "boxW": 290,
+                  "boxH": 250, "pol": "KRPUS", "pod": "CNSHA", "cargoReadyDate": "2026-11-10", "incoterms": "FOB",
+                  "containerType": "40HQ", "grossWeightKg": 4950, "invoiceValue": 60000, "ccy": "USD",
+                  "paymentTerm": "L/C at sight", "customerName": "대한어패럴㈜", "contactName": "박준호 차장",
+                  "contactEmail": "junho.park@daehan-apparel.co.kr"}},
+
+    {"id": "T06", "desc": "라벨 없는 문장형 (말로 쓴 수, 나뉜 금액·통화, 음차 결제조건) — LLM 효과 확인용",
+     "mails": [{"from": ("최서연", "seoyeon@greenoffice.kr"), "subject": "견적 부탁드립니다", "body": """안녕하세요, 그린오피스 최서연입니다.
+부산에서 싱가포르로 LCL로 보낼 노트가 열 박스 있어요.
+한 박스가 가로 310 세로 450 높이 270mm이고 무게는 다 합쳐 오백 킬로 정도예요.
+화물은 10월 20일쯤 준비되고 CIF로 부탁드려요.
+금액은 3,000이고 통화는 USD입니다.
+결제는 티티 30% 선결제로 할게요.
+
+감사합니다.
+최서연 드림"""}],
+     # 연도 없는 '10월 20일'은 측정일 기준 다가오는 날로 추정한다 (2026-10-27 이후에 재면 2027년이 되어 틀림으로 셈)
+     "expected": {"commodity": "노트", "qty": 10, "qtyUnit": "CTNS", "packing": "Carton", "boxL": 310, "boxW": 450,
+                  "boxH": 270, "pol": "KRPUS", "pod": "SGSIN", "cargoReadyDate": "2026-10-20", "incoterms": "CIF",
+                  "containerType": "LCL", "grossWeightKg": 500, "invoiceValue": 3000, "ccy": "USD",
+                  "paymentTerm": "T/T 30% Advance", "customerName": "그린오피스", "contactName": "최서연",
+                  "contactEmail": "seoyeon@greenoffice.kr"}},
+
+    {"id": "T07", "desc": "영문 LCL 부산→싱가포르, LBS·CFT·inch",
+     "mails": [{"from": ("John Smith", "john.smith@abc-trading.com"), "subject": "RFQ - LCL Busan to Singapore", "body": """Dear LEONA team,
+
+Please quote LCL ocean freight for the shipment below.
+
+Commodity: Kitchen Utensils
+Quantity: 40 cartons
+Carton Size: 20 x 16 x 12 inch
+Total Volume: 88.9 CFT
+Gross Weight: 1,320 LBS
+POL: Busan, Korea
+POD: Singapore
+Cargo Ready Date: Nov 12, 2026
+Incoterms: CIF
+Invoice Value: USD 8,400
+Payment Terms: L/C at sight
+
+Best regards,
+John Smith
+Purchasing Manager
+ABC Trading Co., Ltd."""}],
+     "expected": {"commodity": "Kitchen Utensils", "qty": 40, "qtyUnit": "CTNS", "packing": "Carton", "boxL": 508, "boxW": 406,
+                  "boxH": 305, "totalCbm": 2.5174, "pol": "KRPUS", "pod": "SGSIN", "cargoReadyDate": "2026-11-12",
+                  "incoterms": "CIF", "containerType": "LCL", "grossWeightKg": 598.742, "invoiceValue": 8400, "ccy": "USD",
+                  "paymentTerm": "L/C at sight", "customerName": "ABC Trading Co., Ltd.", "contactName": "John Smith",
+                  "contactEmail": "john.smith@abc-trading.com"}},
+
+    {"id": "T08", "desc": "부산→첸나이 40HQ (월간 운임표 구간)",
+     "mails": [{"from": ("", "sales@elec-parts.co.kr"), "subject": "부산 → 첸나이 40HQ 견적", "body": """품목: 전자부품
+수량: 300박스
+총 부피: 55CBM
+총중량: 9,000kg
+선적항: 부산
+도착항: 첸나이
+화물 준비일: 2026-11-20
+조건: CIF
+컨테이너: 40HQ 1대
+인보이스 금액: USD 25,000
+결제조건: T/T 30% Advance
+
+감사합니다."""}],
+     "expected": {"commodity": "전자부품", "qty": 300, "qtyUnit": "CTNS", "packing": "Carton", "totalCbm": 55,
+                  "pol": "KRPUS", "pod": "INMAA", "cargoReadyDate": "2026-11-20", "incoterms": "CIF",
+                  "containerType": "40HQ", "grossWeightKg": 9000, "invoiceValue": 25000, "ccy": "USD",
+                  "paymentTerm": "T/T 30% Advance", "contactEmail": "sales@elec-parts.co.kr"}},
+]
+
+
 def all_cases() -> list[dict]:
     """기본 세트 + eval/cases/*.json (팀원·발주 측이 추가한 '블라인드' 메일).
 

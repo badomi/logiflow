@@ -85,7 +85,7 @@ def evaluate(llm=None, model: str | None = None, cases: list[dict] | None = None
     per_field = {f: {"filled": 0, "correct": 0, "expected": 0} for f in FIELDS}
     errors, cases, times, multi_ok, unparsed = [], [], [], 0, []
     for case in cases_in:
-        result = engine.run(load_mails(case), llm=llm, model_name=model, scope=scope)
+        result = engine.run(load_mails(case), llm=llm, model_name=model, scope=scope, asked=case.get("asked"))
         times.append(result["elapsedMs"])
         expected = case["expected"]
         c_filled = c_correct = 0

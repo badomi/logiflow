@@ -254,7 +254,9 @@ def extract(sources: list[Source], asked: list[str | None] | None = None) -> tup
                 bare = re.sub(_BULLET, "", line).strip()
                 scores = label_scores(bare) if len(bare) <= 30 else []
                 nxt = P.clean(lines[i + 1])
-                if scores and scores[0][1] == 1.0 and not _LABEL_LINE.match(nxt):
+                next_is_label = bool(label_scores(re.sub(_BULLET, "", nxt).strip())[:1]) and \
+                    label_scores(re.sub(_BULLET, "", nxt).strip())[0][1] >= 0.9
+                if scores and scores[0][1] == 1.0 and not _LABEL_LINE.match(nxt) and not next_is_label:
                     parsed, found = parse_value(scores[0][0], nxt, bare)
                     if emit(parsed, found, 0.9, f"{original.strip()} / {lines[i + 1].strip()}", src):
                         matched = skip_next = True
