@@ -103,13 +103,43 @@ def test_quote_xlsx_follows_template(client, connect):
     ws = load_workbook(settings.storage_dir / case_id / "quotes" / f"{case_id}_견적서.xlsx").active
     assert case_id in ws["B12"].value and ws["C17"].value == ": INCHEON - SYDNEY" and ws["C20"].value == ": CIF"
     assert ws["C35"].value == "USD500.00 + KRW140,203" and len(ws._images) == 1
-    # 예시 견적서 형식: 한 페이지 맞춤(F열 주소·DATE·REMARK 포함), R/T 기준, 쓰지 않은 줄 숨김, 한글 유효기간
+    # 예시 견적서 형식: 한 페이지 맞춤(F열 주소·DATE·REMARK 포함), R/T 기준, 쓰지 않은 줄 숨김. 문구는 기본 영문 (FR-510)
     assert ws.sheet_properties.pageSetUpPr.fitToPage and ws.page_setup.fitToWidth == 1
     assert ws["F2"].value == "LEONA SEA & AIR CO., LTD." and ws["F21"].value.startswith("DATE : 20")
-    assert ws["D22"].value == "R/T" and ws["C19"].value.endswith("(1 R/T 기준)")
-    assert ws["B29"].value == "CUSTOMS CLEARANCE FEE" and ws["F29"].value == "INV.V x 1/1,000 (MIN 기준)"
+    assert ws["D22"].value == "R/T" and ws["C19"].value.endswith("(based on 1 R/T)")
+    assert ws["B29"].value == "CUSTOMS CLEARANCE FEE" and ws["F29"].value == "INV.V x 1/1,000 (MIN)"
     assert ws.row_dimensions[31].hidden and not ws.row_dimensions[30].hidden
-    assert any(ws[f"B{r}"].value.startswith("* VALIDITY : 2026년") for r in range(39, 45) if ws[f"B{r}"].value)
+    assert any(ws[f"B{r}"].value.startswith("* VALIDITY : 2026-") for r in range(39, 45) if ws[f"B{r}"].value)
+
+
+def fixed_text(ws) -> str:
+    """견적서에서 시스템이 쓰는 고정 문구 칸 (화주가 적은 값이 들어가는 수신·화물 줄은 뺀다)."""
+    refs = ["B10", "B12", "B14", "B15", "B48", "F49", *[f"B{r}" for r in range(38, 48)], *[f"F{r}" for r in range(22, 36)]]
+    return "\n".join(str(ws[ref].value) for ref in refs if ws[ref].value)
+
+
+def test_quote_is_english_by_default(client, connect):
+    """FR-510: 견적서는 기본 영문 — 고정 문구·비고에 한글이 없다."""
+    case_id = create(client, text_mail(FULL_LCL))["caseId"]
+    ws = load_workbook(settings.storage_dir / case_id / "quotes" / f"{case_id}_견적서.xlsx").active
+    text = fixed_text(ws)
+    assert not [ch for ch in text if "가" <= ch <= "힣"], text
+    assert ws["B10"].value == "From : LEONA SEA & AIR CO., LTD. / Quotation Team"
+    assert ws["B12"].value == f"Subject : Ocean Freight Quotation  [{case_id}]"
+    # 회사명·담당자명이 없는 메일이면 수신 줄에 회신 주소를 적는다 (빈 줄로 나가지 않게)
+    assert ws["B9"].value == "To : buyer@abc-trading.example.com" and ws["B48"].value == "* Thank you."
+    assert f"* QUOTE NO. : {case_id} (Rev. 1)" in text and "* Exchange rate on the actual sailing date" in text
+
+
+def test_quote_language_can_be_korean(client, connect, monkeypatch):
+    """QUOTE_LANGUAGE=ko 이면 발주 측 예시 견적서의 한글 문구를 쓴다."""
+    monkeypatch.setattr(settings, "quote_language", "ko")
+    case_id = create(client, text_mail(FULL_LCL))["caseId"]
+    ws = load_workbook(settings.storage_dir / case_id / "quotes" / f"{case_id}_견적서.xlsx").active
+    assert ws["B10"].value == "발 신 : 레오나 해운항공㈜ / 견적 담당 드림" and "해상 수출 운임 제안서" in ws["B12"].value
+    assert ws["C19"].value.endswith("(1 R/T 기준)") and ws["F29"].value == "INV.V x 1/1,000 (MIN 기준)"
+    assert ws["B48"].value == "* 감사합니다." and ws["B9"].value == "수 신 : buyer@abc-trading.example.com"
+    assert any((ws[f"B{r}"].value or "").startswith("* VALIDITY : 2026년") for r in range(39, 48))
 
 
 def test_multi_item_sample_is_held_without_mixed_values(client, connect):
@@ -437,7 +467,8 @@ def test_missing_count_is_estimated_from_volume_and_explained(client, connect):
     quote = case["extraction"]["validation"]["quote"]
     assert quote["containerCount"] == 2 and "100CBM" in quote["containerCountNote"]  # 76CBM×0.88 넘음 → 2대
     ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
-    assert any("40HQ 2대로 산정" in (ws[f"B{r}"].value or "") for r in range(39, 48))
+    assert any("Container q'ty : 2 x 40HQ (estimated from cargo 100CBM / 20,000KG)" in (ws[f"B{r}"].value or "")
+               for r in range(39, 48))
 
 
 @pytest.mark.parametrize("stated,asked", [("1대", True), ("2대", False)])
@@ -732,7 +763,7 @@ def test_client_lookup_example_is_reproduced(client, client_rates):
     ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
     remarks = [ws[f"B{r}"].value or "" for r in range(39, 48)]
     assert any("ETD / ETA : 2026-10-06 / 2026-10-08 (HMM)" in r for r in remarks)
-    assert any("FREE TIME : DET 7일 / DEM 7일" in r for r in remarks)
+    assert any("FREE TIME : DET 7 days / DEM 7 days" in r for r in remarks)
     assert fields["pol"]["value"] == "CNSHA" and detail["status"] == "계산완료"
 
 
@@ -755,6 +786,18 @@ def test_client_rates_fob_excludes_freight_and_destination(client, client_rates)
     lines = {line["charge"] for line in case["extraction"]["validation"]["quote"]["lines"]}
     assert "OCEAN FREIGHT" not in lines and "DESTINATION THC" not in lines and "CARGO INSURANCE" not in lines
     assert case["extraction"]["validation"]["quote"]["totals"] == {"USD": 280.0}  # OTHC 120 + DOC 30 + BL 30 + 취급 50 + BAF 50
+
+
+@pytest.mark.parametrize("days,valid_until", [(14, "2026-10-13"), (7, "2026-10-06"), (1, "2026-09-30"),
+                                              (30, "2026-10-13"), (0, "2026-09-30")])
+def test_quote_validity_days_is_selectable(client, client_rates, monkeypatch, days, valid_until):
+    """FR-507: 견적 유효기간은 설정(QUOTE_VALIDITY_DAYS)으로 1~14일 중에서 고른다. 범위를 벗어나면 1 또는 14."""
+    monkeypatch.setattr(settings, "quote_validity_days", days)
+    case = create(client, text_mail(CLIENT_CASE.format(carrier="")))
+    quote = case["extraction"]["validation"]["quote"]
+    assert quote["validUntil"] == valid_until  # 테스트의 '오늘'은 2026-09-29
+    ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
+    assert any(f"* VALIDITY : {valid_until}" == (ws[f"B{r}"].value or "") for r in range(39, 48))
 
 
 def test_client_rates_bad_file_changes_nothing(client, client_rates):

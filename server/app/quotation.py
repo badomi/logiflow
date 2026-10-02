@@ -6,6 +6,7 @@
 - 파일은 storage/<케이스ID>/quotes/<케이스ID>_견적서.xlsx → A트랙 [견적서 송부 초안]이 그대로 첨부한다.
   다시 계산하면 이전 파일은 quote-history/로 옮긴다 (송부 초안에 옛 버전이 같이 붙지 않도록).
 - 케이스 ID를 Subject 줄에 표기한다 (FR-102: 화면·메일 제목·견적서 동일 표기).
+- 고정 문구는 기본 영문 (FR-510). .env의 QUOTE_LANGUAGE=ko 로 발주 측 예시의 한글 문구를 쓸 수 있다.
 
 PDF는 LibreOffice로 같은 XLSX를 변환하고, 없거나 실패하면 내장 엔진(quote_pdf.py)으로 만들어 옆에 둔다 → 송부 초안에 PDF·XLSX가 함께 첨부된다 (MUST-SHIP ④).
 """
@@ -15,6 +16,7 @@ import logging
 import math
 from datetime import date
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -201,7 +203,7 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
                       else (rule.free_time_det if rule else None))
     qi.freeTimeDem = (freight.free_time_dem if freight and freight.free_time_dem is not None
                       else (rule.free_time_dem if rule else None))
-    qi.validityDays = rule.validity_days if rule else 14
+    qi.validityDays = rule.validity_days if rule else default_validity_days()
     qi.exchangeRateAsOf = today.isoformat()  # 실제 환율은 출항일 기준 적용 — 견적서 비고에 고지 (FR-508)
     etd = freight.etd if freight else None
     eta = freight.eta if freight else None
@@ -259,6 +261,18 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
     }
 
 
+VALIDITY_MIN, VALIDITY_MAX = 1, 14
+
+
+def default_validity_days() -> int:
+    """견적 유효기간 기본값(일). .env의 QUOTE_VALIDITY_DAYS로 1~14 중에서 고른다 (범위를 벗어나면 1 또는 14)."""
+    try:
+        days = int(getattr(settings, "quote_validity_days", VALIDITY_MAX))
+    except (TypeError, ValueError):
+        days = VALIDITY_MAX
+    return min(VALIDITY_MAX, max(VALIDITY_MIN, days))
+
+
 def percent_amount(rate: Rate, qi) -> tuple[float | None, str | None]:
     """화물가액 × 비율, 최저 금액 (예: 보험 15,000 × 0.2% = 30, 최저 30). 통화가 다르면 계산하지 않는다(환율 미반영)."""
     pct = rate.rate_pct or 0
@@ -287,6 +301,92 @@ def _fmt_num(value: float | None) -> str:
 def total_text(quote: Quote) -> str:
     parts = [f"{t.currency}{t.total:,.2f}" if t.currency == "USD" else f"{t.currency}{t.total:,.0f}" for t in quote.totals]
     return " + ".join(parts)
+
+
+# 견적서 고정 문구 (FR-510: 견적서는 기본 영문). ko는 발주 측 예시 견적서(LCL·FOB PDF)의 한글 문구 그대로.
+# .env의 QUOTE_LANGUAGE=ko 로 바꾼다. 화주가 적은 값(회사명·품목 등)과 요율표 비고는 번역하지 않는다.
+TEXT = {
+    "en": {
+        "to": "To : {customer} / Attn : {contact}", "to_one": "To : {name}",
+        "from": "From : LEONA SEA & AIR CO., LTD. / Quotation Team",
+        "subject": "Subject : Ocean Freight Quotation  [{case_id}]",
+        "greeting1": "* Thank you for your inquiry.",
+        "greeting2": "* We are pleased to quote as below for your reference.",
+        "rt_basis": " (based on {rt} R/T)",
+        "fx": "* Exchange rate on the actual sailing date will be applied.",
+        "subject_to_change": "* The above quotation is subject to change according to cargo details.",
+        "carrier": "* CARRIER : {carrier}",
+        "transit": "* T/T : approx. {days} days",
+        "free_time": "* FREE TIME : DET {det} days / DEM {dem} days",
+        "validity": "* VALIDITY : {date}",
+        "quote_no": "* QUOTE NO. : {case_id} (Rev. {version})",
+        "thanks": "* Thank you.", "seal": "(Company seal omitted)",
+    },
+    "ko": {
+        "to": "수 신 : {customer} / {contact} 님", "to_one": "수 신 : {name} 님",
+        "from": "발 신 : 레오나 해운항공㈜ / 견적 담당 드림",
+        "subject": "Subject : 해상 수출 운임 제안서  [{case_id}]",
+        "greeting1": None, "greeting2": None,  # 양식에 적힌 문구를 그대로 둔다
+        "rt_basis": " ({rt} R/T 기준)",
+        "fx": "* 실제 출항일 환율 적용",
+        "subject_to_change": "* 화물 DETAIL의 변경에 따라 상기 견적이 달라 질 수 있습니다.",
+        "carrier": "* 선사 : {carrier}",
+        "transit": "* T/T : 약 {days}일",
+        "free_time": "* FREE TIME : DET {det}일 / DEM {dem}일",
+        "validity": "* VALIDITY : {date}",
+        "quote_no": "* 견적번호 : {case_id} (v{version})",
+        "thanks": None, "seal": None,
+    },
+}
+BASIS_LABEL = {"PER_RT": "PER R/T", "PER_CNTR": "PER CNTR", "PER_BL": "PER B/L", "PER_SHIPMENT": "PER SHIPMENT",
+               "PER_TRIP": "PER TRIP"}
+# 요율 비고에 섞인 한글 → 영문 (영문 견적서). 여기 없는 한글 비고는 부과 기준(PER CNTR 등)으로 대신한다
+REMARK_EN = (("(MIN 기준)", "(MIN)"), ("보험요율", "insurance rate"),
+             ("— 인보이스 통화가 달라 실비 청구", "— charged at cost (invoice currency differs)"))
+_HANGUL = re.compile("[가-힣]")
+_COUNT_NOTE = re.compile(r"컨테이너 대수: 화물 (.+) 기준 (.+) (\d+)대로 산정")
+
+
+def language() -> str:
+    lang = (getattr(settings, "quote_language", None) or "en").lower()
+    return lang if lang in TEXT else "en"
+
+
+def item_remark(item: QuoteItem, lang: str) -> str:
+    """비용 줄의 REMARK 칸. 영문 견적서에서는 한글 비고를 영문으로 바꾸고, 바꿀 수 없으면 부과 기준을 적는다."""
+    fallback = BASIS_LABEL.get(item.basis, "")
+    text = item.remark or fallback
+    if lang != "en" or not _HANGUL.search(text):
+        return text
+    for korean, english in REMARK_EN:
+        text = text.replace(korean, english)
+    return fallback if _HANGUL.search(text) else text
+
+
+def recipient_line(case: Case, lang: str) -> str:
+    """견적서 수신 줄 (FR-208 To/Attn). 회사명·담당자명을 못 뽑았으면 회신 주소(없으면 요청 메일의 보낸 사람)를 적는다."""
+    qi, t = case.quote_input, TEXT[lang]
+    customer, contact = (qi.customerName or "").strip(), (qi.contactName or "").strip()
+    if customer and contact:
+        return t["to"].format(customer=customer, contact=contact)
+    if customer or contact:
+        return t["to_one"].format(name=customer or contact)
+    fallback = (qi.contactEmail or "").strip()
+    if not fallback:
+        try:
+            original = drafts._original(case)
+            fallback = (original.from_name or original.from_email or "").strip()
+        except Exception:  # noqa: BLE001 — 수신 줄 때문에 견적서가 실패하면 안 된다
+            fallback = ""
+    return t["to_one"].format(name=fallback).replace(" 님", "") if lang == "ko" else t["to_one"].format(name=fallback)
+
+
+def count_note_text(note: str, lang: str) -> str:
+    """컨테이너 대수 산정 근거 (container_count의 한글 문장 → 영문 견적서용)."""
+    m = _COUNT_NOTE.fullmatch(note) if lang == "en" else None
+    if not m:
+        return note
+    return f"Container q'ty : {m[3]} x {m[2]} (estimated from cargo {m[1].replace('·', ' / ')})"
 
 
 COUNTRY = {"KR": "KOREA"}  # FOB 예시의 'BUSAN, KOREA' 표기용 (수출 견적은 선적항이 국내)
@@ -326,9 +426,14 @@ def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: 
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 1
 
-    ws["B9"] = f"수 신 : {qi.customerName or ''} / {qi.contactName or ''} 님".replace(" /  님", " 님")
-    ws["B10"] = "발 신 : 레오나 해운항공㈜ / 견적 담당 드림"
-    ws["B12"] = f"Subject : 해상 수출 운임 제안서  [{case.case_id}]"
+    lang = language()
+    t = TEXT[lang]
+    ws["B9"] = recipient_line(case, lang)
+    ws["B10"] = t["from"]
+    ws["B12"] = t["subject"].format(case_id=case.case_id)
+    for ref, key in (("B14", "greeting1"), ("B15", "greeting2"), ("B48", "thanks"), ("F49", "seal")):
+        if t[key]:
+            ws[ref] = t[key]
     _box(ws, 12, "B", "D")  # 양식의 Subject 상자는 도형이라 저장 시 빠진다(openpyxl) → 셀 테두리로 대신 그린다
 
     size = f" / {qi.boxL} X {qi.boxW} X {qi.boxH}MM" if None not in (qi.boxL, qi.boxW, qi.boxH) else ""
@@ -347,7 +452,7 @@ def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: 
         if is_lcl:
             ws["C18"] = ": BY CONTAINER SHIPMENT (LCL)"
             rt = next((i.qty for i in items if i.basis == "PER_RT" and i.qty), None)
-            ws["C19"] = cargo + (f" ({_fmt_num(rt)} R/T 기준)" if rt else "")
+            ws["C19"] = cargo + (t["rt_basis"].format(rt=_fmt_num(rt)) if rt else "")
             headers = ("RATE", "R/T", "AMOUNT")
         else:
             ws["C18"] = f": BY CONTAINER SHIPMENT ({qi.containerType} X {count or 1})"
@@ -376,26 +481,25 @@ def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: 
             ws[f"D{row}"] = item.qty
             ws[f"E{row}"] = item.amount
             ws[f"E{row}"].number_format = MONEY_FORMAT.get(item.currency, "#,##0.00")
-        ws[f"F{row}"] = item.remark or {"PER_RT": "PER R/T", "PER_CNTR": "PER CNTR", "PER_BL": "PER B/L",
-                                         "PER_SHIPMENT": "PER SHIPMENT", "PER_TRIP": "PER TRIP"}.get(item.basis, "")
+        ws[f"F{row}"] = item_remark(item, lang)
     for row in range(ITEM_FIRST_ROW + len(items), ITEM_LAST_ROW + 1):
         ws.row_dimensions[row].hidden = True  # 쓰지 않은 비용 줄은 숨긴다 (예시처럼 쓴 줄만 보이게)
     ws[f"C{TOTAL_ROW}"] = total_text(quote)
 
-    remarks = ["* 실제 출항일 환율 적용", "* 화물 DETAIL의 변경에 따라 상기 견적이 달라 질 수 있습니다."]
+    remarks = [t["fx"], t["subject_to_change"]]
     if quote.etd or quote.eta:
         carrier = f" ({quote.carrier})" if quote.carrier else ""
         remarks.append(f"* ETD / ETA : {quote.etd or '-'} / {quote.eta or '-'}{carrier}")
     elif quote.carrier:
-        remarks.append(f"* 선사 : {quote.carrier}")
+        remarks.append(t["carrier"].format(carrier=quote.carrier))
     if qi.transitTime:
-        remarks.append(f"* T/T : 약 {qi.transitTime}일")
+        remarks.append(t["transit"].format(days=qi.transitTime))
     if qi.freeTimeDet or qi.freeTimeDem:
-        remarks.append(f"* FREE TIME : DET {qi.freeTimeDet or '-'}일 / DEM {qi.freeTimeDem or '-'}일")
+        remarks.append(t["free_time"].format(det=qi.freeTimeDet or "-", dem=qi.freeTimeDem or "-"))
     if count_note:
-        remarks.append(f"* {count_note}")
-    remarks.append(f"* VALIDITY : {_korean_date(quote.valid_until)}")
-    remarks.append(f"* 견적번호 : {case.case_id} (v{quote.version_no})")
+        remarks.append(f"* {count_note_text(count_note, lang)}")
+    remarks.append(t["validity"].format(date=_korean_date(quote.valid_until) if lang == "ko" else quote.valid_until or ""))
+    remarks.append(t["quote_no"].format(case_id=case.case_id, version=quote.version_no))
     for offset, row in enumerate(range(REMARK_FIRST_ROW, REMARK_LAST_ROW + 1)):
         ws[f"B{row}"] = remarks[offset] if offset < len(remarks) else None
 
