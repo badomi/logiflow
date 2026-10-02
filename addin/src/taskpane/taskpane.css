@@ -1,0 +1,237 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+  font-family: "Segoe UI", "Malgun Gothic", sans-serif;
+  font-size: 14px;
+  color: #201f1e;
+  background: #ffffff;
+}
+
+/* 머리 부분: 로고가 남색이라 흰 배경, 아래에 로고 색(남색·청록) 선 */
+.header {
+  padding: 12px 16px 10px;
+  background: #ffffff;
+  border-bottom: 3px solid #1f3a6e;
+  box-shadow: 0 3px 0 #1f8fa6;
+}
+
+.header__logo {
+  display: block;
+  width: 160px;
+  max-width: 70%;
+  height: auto;
+}
+
+.header p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #1f3a6e;
+}
+
+.main {
+  padding: 12px 16px;
+}
+
+.status {
+  margin: 0 0 12px;
+  padding: 8px;
+  background: #f3f2f1;
+  border-radius: 4px;
+}
+
+.status--error {
+  background: #fde7e9;
+  color: #a4262c;
+}
+
+.status--success {
+  background: #dff6dd;
+  color: #107c10;
+}
+
+.card {
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid #edebe9;
+  border-radius: 4px;
+}
+
+.card h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.case-state {
+  margin: 0 0 8px;
+}
+
+.button {
+  padding: 6px 12px;
+  border: 1px solid #8a8886;
+  border-radius: 2px;
+  background: #ffffff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.button--primary {
+  border-color: #1f3a5f;
+  background: #1f3a5f;
+  color: #ffffff;
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.candidates {
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.candidates li {
+  padding: 8px 0;
+  border-bottom: 1px solid #edebe9;
+}
+
+.candidate__title {
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.candidate__reason {
+  margin: 2px 0 6px;
+  font-size: 12px;
+  color: #605e5c;
+}
+
+.warning {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  background: #fff4ce;
+  color: #7a5c00;
+  font-size: 12px;
+  border-radius: 4px;
+}
+
+.extraction {
+  margin: 8px 0;
+  padding: 8px;
+  background: #f3f2f1;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.extraction p {
+  margin: 0;
+}
+
+.extraction__rerun {
+  margin-top: 8px;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.fields--compact dt {
+  margin-top: 6px;
+  font-size: 11px;
+}
+
+.fields--compact dd {
+  font-size: 12px;
+}
+
+.files {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+.files li {
+  padding: 6px 0;
+  border-bottom: 1px solid #edebe9;
+}
+
+.files .file-meta {
+  color: #605e5c;
+}
+
+.files a {
+  margin-right: 8px;
+  color: #1f3a6e;
+  word-break: break-all;
+}
+
+.label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: #605e5c;
+}
+
+textarea {
+  box-sizing: border-box;
+  width: 100%;
+  font: inherit;
+}
+
+.buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+#manual-select select {
+  width: 100%;
+  margin: 8px 0;
+}
+
+.fields {
+  margin: 0;
+}
+
+.fields dt {
+  margin-top: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #605e5c;
+}
+
+.fields dd {
+  margin: 2px 0 0;
+  word-break: break-all;
+}
+
+.preview {
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+.mono {
+  font-family: Consolas, monospace;
+  font-size: 12px;
+}
+
+.json {
+  margin-top: 16px;
+}
+
+.json summary {
+  cursor: pointer;
+  color: #1f3a5f;
+}
+
+.json pre {
+  max-height: 240px;
+  overflow: auto;
+  padding: 8px;
+  background: #f3f2f1;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

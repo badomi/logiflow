@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Outlook 추가 기능 매니페스트 (XML, add-in only)
+  - Outlook에게 "이 추가 기능이 무엇이고, 어디서(URL) 화면을 불러오며, 어떤 권한이 필요한지" 알려주는 설명서.
+  - 개발 중에는 모든 URL이 https://localhost:3000 (npm start로 띄운 개발 서버)을 가리킨다.
+-->
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0" xmlns:mailappor="http://schemas.microsoft.com/office/mailappversionoverrides/1.0" xsi:type="MailApp">
+  <Id>d880a6c4-eedd-4a5c-8854-8984ba8d04b6</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>Dong-eui University Team</ProviderName>
+  <DefaultLocale>ko-KR</DefaultLocale>
+  <DisplayName DefaultValue="LEONA 자동견적"/>
+  <Description DefaultValue="선택한 견적 요청 메일의 정보를 읽어 패널에 표시합니다."/>
+  <!-- 앱 목록 아이콘은 Microsoft 서버가 가져가므로 공개 주소여야 한다 (localhost 불가). 발주 측 홈페이지 공식 로고 사용 -->
+  <IconUrl DefaultValue="https://www.leonakorea.com/wp-content/uploads/2020/12/main_logo03.png"/>
+  <HighResolutionIconUrl DefaultValue="https://www.leonakorea.com/wp-content/uploads/2020/12/main_logo03.png"/>
+  <SupportUrl DefaultValue="https://localhost:3000/taskpane.html"/>
+  <Hosts>
+    <Host Name="Mailbox"/>
+  </Hosts>
+  <Requirements>
+    <Sets>
+      <!-- 1.3: 본문 읽기(body.getAsync)에 필요한 최소 버전 -->
+      <Set Name="Mailbox" MinVersion="1.3"/>
+    </Sets>
+  </Requirements>
+  <FormSettings>
+    <Form xsi:type="ItemRead">
+      <DesktopSettings>
+        <SourceLocation DefaultValue="https://localhost:3000/taskpane.html"/>
+        <RequestedHeight>250</RequestedHeight>
+      </DesktopSettings>
+    </Form>
+  </FormSettings>
+  <!-- ReadWriteItem: 지금 열린 메일 1통만 읽고, 작성 중인 초안에 제목·첨부를 넣고 저장하는 권한.
+       사서함 전체 접근 권한(ReadWriteMailbox)은 요청하지 않는다. -->
+  <Permissions>ReadWriteItem</Permissions>
+  <!-- 메일 읽기 화면(Read)과 작성 화면(Edit)에서 활성화 -->
+  <Rule xsi:type="RuleCollection" Mode="Or">
+    <Rule xsi:type="ItemIs" ItemType="Message" FormType="Read"/>
+    <Rule xsi:type="ItemIs" ItemType="Message" FormType="Edit"/>
+  </Rule>
+  <DisableEntityHighlighting>false</DisableEntityHighlighting>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Requirements>
+      <bt:Sets DefaultMinVersion="1.3">
+        <bt:Set Name="Mailbox"/>
+      </bt:Sets>
+    </Requirements>
+    <Hosts>
+      <Host xsi:type="MailHost">
+        <DesktopFormFactor>
+          <FunctionFile resid="Commands.Url"/>
+          <!-- 메일 읽기 화면의 리본/메뉴에 버튼 1개를 추가한다 -->
+          <ExtensionPoint xsi:type="MessageReadCommandSurface">
+            <OfficeTab id="TabDefault">
+              <Group id="msgReadGroup">
+                <Label resid="GroupLabel"/>
+                <Control xsi:type="Button" id="msgReadOpenPaneButton">
+                  <Label resid="TaskpaneButton.Label"/>
+                  <Supertip>
+                    <Title resid="TaskpaneButton.Label"/>
+                    <Description resid="TaskpaneButton.Tooltip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16x16"/>
+                    <bt:Image size="32" resid="Icon.32x32"/>
+                    <bt:Image size="80" resid="Icon.80x80"/>
+                  </Icon>
+                  <!-- 버튼을 누르면 작업창(패널)을 연다 -->
+                  <Action xsi:type="ShowTaskpane">
+                    <SourceLocation resid="Taskpane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+          <!-- 메일 작성 창의 리본에 [LEONA 초안 마무리] 버튼: 작성 모드 패널을 열어 제목·첨부를 채우고 초안함에 저장 -->
+          <ExtensionPoint xsi:type="MessageComposeCommandSurface">
+            <OfficeTab id="TabDefault">
+              <Group id="msgComposeGroup">
+                <Label resid="GroupLabel"/>
+                <Control xsi:type="Button" id="msgComposeFinalizeButton">
+                  <Label resid="FinalizeButton.Label"/>
+                  <Supertip>
+                    <Title resid="FinalizeButton.Label"/>
+                    <Description resid="FinalizeButton.Tooltip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16x16"/>
+                    <bt:Image size="32" resid="Icon.32x32"/>
+                    <bt:Image size="80" resid="Icon.80x80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <SourceLocation resid="Taskpane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Icon.16x16" DefaultValue="https://localhost:3000/assets/icon-16.png"/>
+        <bt:Image id="Icon.32x32" DefaultValue="https://localhost:3000/assets/icon-32.png"/>
+        <bt:Image id="Icon.80x80" DefaultValue="https://localhost:3000/assets/icon-80.png"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="Commands.Url" DefaultValue="https://localhost:3000/commands.html"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/taskpane.html"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="GroupLabel" DefaultValue="LEONA 자동견적"/>
+        <bt:String id="TaskpaneButton.Label" DefaultValue="LEONA 패널"/>
+        <bt:String id="FinalizeButton.Label" DefaultValue="LEONA 초안 마무리"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="TaskpaneButton.Tooltip" DefaultValue="선택한 메일 정보를 보여주는 패널을 엽니다."/>
+        <bt:String id="FinalizeButton.Tooltip" DefaultValue="패널에서 연 초안의 제목(케이스 ID)·첨부를 채우고 초안함에 저장합니다. 보내기는 직접 누릅니다."/>
+      </bt:LongStrings>
+    </Resources>
+    <!-- 1.1 규격을 아는 Outlook은 아래 설정을 쓰고, 모르는 Outlook은 위(1.0) 설정을 쓴다 -->
+    <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides/1.1" xsi:type="VersionOverridesV1_1">
+      <Requirements>
+        <!-- 1.8: 작성 중 초안에 Base64 첨부(addFileAttachmentFromBase64Async)에 필요한 최소 버전 -->
+        <bt:Sets DefaultMinVersion="1.8">
+          <bt:Set Name="Mailbox"/>
+        </bt:Sets>
+      </Requirements>
+      <Hosts>
+        <Host xsi:type="MailHost">
+          <DesktopFormFactor>
+            <FunctionFile resid="Commands.Url"/>
+            <!-- 메일 읽기 화면의 리본/메뉴에 버튼 1개를 추가한다 -->
+            <ExtensionPoint xsi:type="MessageReadCommandSurface">
+              <OfficeTab id="TabDefault">
+                <Group id="msgReadGroup">
+                  <Label resid="GroupLabel"/>
+                  <Control xsi:type="Button" id="msgReadOpenPaneButton">
+                    <Label resid="TaskpaneButton.Label"/>
+                    <Supertip>
+                      <Title resid="TaskpaneButton.Label"/>
+                      <Description resid="TaskpaneButton.Tooltip"/>
+                    </Supertip>
+                    <Icon>
+                      <bt:Image size="16" resid="Icon.16x16"/>
+                      <bt:Image size="32" resid="Icon.32x32"/>
+                      <bt:Image size="80" resid="Icon.80x80"/>
+                    </Icon>
+                    <!-- 버튼을 누르면 작업창(패널)을 연다 -->
+                    <Action xsi:type="ShowTaskpane">
+                      <SourceLocation resid="Taskpane.Url"/>
+                      <!-- 패널 고정: 메일을 바꿔도 패널이 닫히지 않는다 (요구사항 세트 1.5) -->
+                      <SupportsPinning>true</SupportsPinning>
+                    </Action>
+                  </Control>
+                </Group>
+              </OfficeTab>
+            </ExtensionPoint>
+            <!-- 메일 작성 창의 리본에 [LEONA 초안 마무리] 버튼: 작성 모드 패널을 열어 제목·첨부를 채우고 초안함에 저장 -->
+            <ExtensionPoint xsi:type="MessageComposeCommandSurface">
+              <OfficeTab id="TabDefault">
+                <Group id="msgComposeGroup">
+                  <Label resid="GroupLabel"/>
+                  <Control xsi:type="Button" id="msgComposeFinalizeButton">
+                    <Label resid="FinalizeButton.Label"/>
+                    <Supertip>
+                      <Title resid="FinalizeButton.Label"/>
+                      <Description resid="FinalizeButton.Tooltip"/>
+                    </Supertip>
+                    <Icon>
+                      <bt:Image size="16" resid="Icon.16x16"/>
+                      <bt:Image size="32" resid="Icon.32x32"/>
+                      <bt:Image size="80" resid="Icon.80x80"/>
+                    </Icon>
+                    <Action xsi:type="ShowTaskpane">
+                      <SourceLocation resid="Taskpane.Url"/>
+                    </Action>
+                  </Control>
+                </Group>
+              </OfficeTab>
+            </ExtensionPoint>
+          </DesktopFormFactor>
+        </Host>
+      </Hosts>
+      <Resources>
+        <bt:Images>
+          <bt:Image id="Icon.16x16" DefaultValue="https://localhost:3000/assets/icon-16.png"/>
+          <bt:Image id="Icon.32x32" DefaultValue="https://localhost:3000/assets/icon-32.png"/>
+          <bt:Image id="Icon.80x80" DefaultValue="https://localhost:3000/assets/icon-80.png"/>
+        </bt:Images>
+        <bt:Urls>
+          <bt:Url id="Commands.Url" DefaultValue="https://localhost:3000/commands.html"/>
+          <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/taskpane.html"/>
+        </bt:Urls>
+        <bt:ShortStrings>
+          <bt:String id="GroupLabel" DefaultValue="LEONA 자동견적"/>
+          <bt:String id="TaskpaneButton.Label" DefaultValue="LEONA 패널"/>
+          <bt:String id="FinalizeButton.Label" DefaultValue="LEONA 초안 마무리"/>
+        </bt:ShortStrings>
+        <bt:LongStrings>
+          <bt:String id="TaskpaneButton.Tooltip" DefaultValue="선택한 메일 정보를 보여주는 패널을 엽니다."/>
+          <bt:String id="FinalizeButton.Tooltip" DefaultValue="패널에서 연 초안의 제목(케이스 ID)·첨부를 채우고 초안함에 저장합니다. 보내기는 직접 누릅니다."/>
+        </bt:LongStrings>
+      </Resources>
+    </VersionOverrides>
+  </VersionOverrides>
+</OfficeApp>

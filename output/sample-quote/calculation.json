@@ -1,0 +1,106 @@
+{
+  "items": [
+    {
+      "charge_code": "OCEAN_FREIGHT",
+      "charge_label": "OCEAN FREIGHT",
+      "basis": "PER_CNTR",
+      "rate": 450.0,
+      "qty": 1,
+      "amount": 450.0,
+      "currency": "USD",
+      "remark": "HMM / PER CNTR",
+      "sourceSheet": "OceanFreight",
+      "sourceRow": 5
+    },
+    {
+      "charge_code": "OTHC",
+      "charge_label": "ORIGIN THC",
+      "basis": "PER_CNTR",
+      "rate": 120.0,
+      "qty": 1,
+      "amount": 120.0,
+      "currency": "USD",
+      "remark": "PER_CONTAINER",
+      "sourceSheet": "Surcharges",
+      "sourceRow": 5
+    },
+    {
+      "charge_code": "DTHC",
+      "charge_label": "DESTINATION THC",
+      "basis": "PER_CNTR",
+      "rate": 130.0,
+      "qty": 1,
+      "amount": 130.0,
+      "currency": "USD",
+      "remark": "PER_CONTAINER",
+      "sourceSheet": "Surcharges",
+      "sourceRow": 8
+    },
+    {
+      "charge_code": "DOC",
+      "charge_label": "DOCUMENTATION FEE",
+      "basis": "PER_BL",
+      "rate": 30.0,
+      "qty": 1,
+      "amount": 30.0,
+      "currency": "USD",
+      "remark": "PER_BL",
+      "sourceSheet": "Surcharges",
+      "sourceRow": 11
+    },
+    {
+      "charge_code": "BL",
+      "charge_label": "B/L FEE",
+      "basis": "PER_BL",
+      "rate": 30.0,
+      "qty": 1,
+      "amount": 30.0,
+      "currency": "USD",
+      "remark": "PER_BL",
+      "sourceSheet": "Surcharges",
+      "sourceRow": 12
+    },
+    {
+      "charge_code": "HANDLING",
+      "charge_label": "HANDLING CHARGE",
+      "basis": "PER_BL",
+      "rate": 50.0,
+      "qty": 1,
+      "amount": 50.0,
+      "currency": "USD",
+      "remark": "PER_BL",
+      "sourceSheet": "Surcharges",
+      "sourceRow": 13
+    },
+    {
+      "charge_code": "INS",
+      "charge_label": "CARGO INSURANCE",
+      "basis": "PER_BL",
+      "rate": 30.0,
+      "qty": 1,
+      "amount": 30.0,
+      "currency": "USD",
+      "remark": "VALUE x 0.2%; MIN USD 30",
+      "sourceSheet": "Surcharges",
+      "sourceRow": 14
+    },
+    {
+      "charge_code": "BAF",
+      "charge_label": "BUNKER SURCHARGE",
+      "basis": "PER_CNTR",
+      "rate": 50.0,
+      "qty": 1,
+      "amount": 50.0,
+      "currency": "USD",
+      "remark": "PER_CONTAINER",
+      "sourceSheet": "Surcharges",
+      "sourceRow": 15
+    }
+  ],
+  "totals": {
+    "USD": 890.0
+  },
+  "rateValidUntil": "2026-10-15",
+  "carrier": "HMM",
+  "rateId": 1
+}

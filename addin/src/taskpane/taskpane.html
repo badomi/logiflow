@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LEONA 자동견적</title>
+
+    <!-- Office JavaScript API: Outlook과 대화하는 공식 라이브러리 -->
+    <script type="text/javascript" src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+
+    <link href="taskpane.css" rel="stylesheet" type="text/css" />
+</head>
+
+<body>
+    <header class="header">
+        <!-- 발주 측(레오나 해운항공) 로고 — 변형하지 않고 그대로 사용 -->
+        <img class="header__logo" src="../../assets/leona-logo.png" alt="LEONA Sea &amp; Air" />
+        <p>AI 자동견적 · 담당자 패널</p>
+    </header>
+
+    <!-- Outlook 밖(일반 브라우저)에서 열었을 때만 보이는 안내 -->
+    <section id="sideload-msg" class="main">
+        <p>이 페이지는 Outlook에 추가 기능으로 설치(사이드로드)한 뒤 메일을 선택해야 동작합니다.</p>
+    </section>
+
+    <main id="app-body" class="main" style="display: none;">
+        <p id="status" class="status" hidden></p>
+
+        <!-- 작성 창에서 연 패널: 초안 마무리 (FR-304·505). 읽기 화면용 영역은 숨긴다 -->
+        <section id="compose-section" class="card" hidden>
+            <h2>초안 마무리</h2>
+            <p id="compose-state"></p>
+            <button id="compose-retry" class="button" hidden>다시 시도</button>
+        </section>
+
+        <div id="read-body">
+        <!-- 케이스 등록 상태와 [케이스 생성] 버튼 (FR-101) -->
+        <section id="case-section" class="card">
+            <p id="case-state" class="case-state"></p>
+            <!-- 항목 추출 상태 (FR-101): 추출 중 → 완료/미연결/실패, 걸린 시간, 뽑힌 항목 -->
+            <div id="extraction" class="extraction" hidden>
+                <p id="extraction-state"></p>
+                <dl id="extraction-result" class="fields fields--compact"></dl>
+                <button id="rerun-extraction" class="button extraction__rerun" hidden>다시 추출</button>
+            </div>
+            <button id="create-case" class="button button--primary" hidden>케이스 생성</button>
+        </section>
+
+        <section id="validity-section" class="card" hidden>
+            <h2>견적 유효기간</h2>
+            <label class="label" for="validity-days">이번 견적의 유효일수 (발행일 기준)</label>
+            <select id="validity-days" aria-describedby="validity-note"></select>
+            <button id="apply-validity" class="button">적용하고 견적서 다시 만들기</button>
+            <p id="validity-note">1~14일 중 선택하세요. 적용하면 PDF·Excel이 새 버전으로 생성됩니다.</p>
+        </section>
+
+        <!-- 케이스 자료: 저장된 메일 원문·첨부를 다시 열기 (FR-103) -->
+        <section id="files-section" class="card" hidden>
+            <h2>케이스 자료</h2>
+            <ul id="case-files" class="files"></ul>
+        </section>
+
+        <!-- 담당자가 보낸 [케이스ID] 메일: 발송 시각·수행자 기록 (FR-505) -->
+        <section id="sent-section" class="card" hidden>
+            <p id="sent-state"></p>
+            <button id="record-sent" class="button button--primary">발송 기록</button>
+        </section>
+
+        <!-- 회신 연결 (FR-104): 자동 후보 → 담당자가 골라 병합, 후보가 없으면 직접 선택 -->
+        <!-- 초안 만들기 (FR-304·505): 읽기 화면에서는 작성 창을 띄우고, 작성 창에서는 그 메일을 채운다(작성 창에서는 코드가 초안 마무리 아래로 옮긴다), 발송은 담당자가 직접 한다 -->
+        <section id="draft-section" class="card" hidden>
+            <h2>메일 초안</h2>
+            <label for="questions" class="label">보완 요청 문항 (한 줄에 하나 · 항목·조건은 유지하고 요청 표현만 수정 · 모두 비우면 자동 복원)</label>
+            <textarea id="questions" rows="4" placeholder="예) 선적항(POL)을 알려 주세요."></textarea>
+            <div class="buttons">
+                <button id="supplement-draft" class="button">보완 요청 초안 만들기</button>
+                <button id="quote-draft" class="button">견적서 송부 초안 만들기</button>
+            </div>
+        </section>
+
+        <section id="reply-section" class="card" hidden>
+            <h2>회신으로 병합</h2>
+            <p id="reply-warning" class="warning" hidden>보낸 사람이 담당자 본인입니다. 화주가 보낸 회신이 아니면 병합하지 마세요.</p>
+            <ul id="reply-candidates" class="candidates"></ul>
+            <details id="manual-select">
+                <summary>케이스 직접 선택</summary>
+                <select id="case-select"></select>
+                <button id="merge-selected" class="button">선택한 케이스에 병합</button>
+            </details>
+        </section>
+
+        <dl class="fields">
+            <dt>제목</dt>
+            <dd id="subject">-</dd>
+
+            <dt>발신자</dt>
+            <dd id="from">-</dd>
+
+            <dt id="received-at-label">수신 시각</dt>
+            <dd id="received-at">-</dd>
+
+            <dt>본문 앞부분</dt>
+            <dd id="body-preview" class="preview">-</dd>
+
+            <dt>conversationId</dt>
+            <dd id="conversation-id" class="mono">-</dd>
+
+            <dt>internetMessageId</dt>
+            <dd id="internet-message-id" class="mono">-</dd>
+        </dl>
+
+        <details class="json">
+            <summary>메일 표준 JSON 보기</summary>
+            <pre id="snapshot-json"></pre>
+        </details>
+        </div>
+    </main>
+</body>
+
+</html>

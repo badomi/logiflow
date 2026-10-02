@@ -1,0 +1,176 @@
+# B트랙 추출 엔진 — 룰 + 로컬 LLM 하이브리드
+
+코드: `server/app/extraction/` · 측정: `server/eval/` · 테스트: `server/tests/test_extraction.py`, `test_pipeline_flow.py`, `test_eval_precision.py`
+
+## 설계 원칙 — LLM 중심 (2026-09-30 개편)
+**LLM이 모든 항목을 읽어 '뜻'을 정리하고, 규칙은 교차 확인·단위 환산·코드 변환을 한다.**
+
+```
+메일(원문+회신+첨부)
+  └ preprocess   인용문 분리(WBS 3.5) · Outlook 목록 갈라짐 복구 · 서명 분리
+      ├ llm_stage    메일 줄마다 L번호 → 로컬 LLM이 모든 항목을 {v: '숫자 단위'로 정리한 값, l: [근거 줄 번호]}로 답함
+      │              말로 쓴 수(오백, 반 톤, 한 대)→숫자, 나뉜 금액·통화 합치기, 번호 답변은 '직전 질문'에 맞춰 해석
+      │              └ grounding  줄 번호가 실제로 있나? 값의 숫자가 그 줄에 있나(말로 쓴 수면 0.8)? 뜻이 같나(규칙 해석기로
+      │                           원문 줄도 읽어 비교: 하이큐브=40HQ, 싱가포르=Singapore)? 아니면 버림 (지어낸 값 차단)
+      ├ rules        키워드 사전 '라벨: 값'·번호 답변·문장 → 교차 확인용 후보 (LLM이 꺼지면 이것만으로)       FR-201·205
+      └ signature    서명·From 헤더 → 고객사·담당자·이메일                                              FR-208
+  └ rules.parse_value  LLM 값·규칙 값 모두 같은 해석기: LBS→KG, CFT→CBM, inch→mm, 날짜, 항구→UN/LOCODE    FR-203
+  └ engine       필드별 결합: LLM=규칙 일치 +0.1 / 불일치 → 확인 필요 / 최신 메일 우선                 FR-202·207·209
+                 해석 못 한 값은 '확인 필요'(원문 짚어 질문). 다품목이면 화물 필드 저장 안 함                FR-210
+```
+- 근거를 문장 복사 대신 **줄 번호**로 받아 응답이 짧다 (CPU 노트북에서도 전 항목). 근거는 실제 원문 줄이라 지어낼 수 없다.
+- LLM은 계산·단위 환산을 하지 않는다. 날짜는 원문에 연도가 없으면 LLM이 붙인 연도를 믿지 않고 규칙이 추정(확신도 0.8).
+- 작은 모델 실수 방지: 규칙이 '픽업지'로 읽은 줄을 선적항으로 쓰면 저장 안 함, 결제조건은 원문에 결제 방식 단어가 있을 때만,
+  **다른 종류의 값**(인보이스 금액 칸에 '360 kg')이면 줄을 잘못 짚은 것으로 보고 버림.
+- 규칙·LLM이 어긋나도 **한쪽이 확신 낮으면**(단위 빠진 규격 등) 확실한 쪽을 쓴다 — 둘 다 확실할 때만 '확인 필요'.
+- 담당자·고객사는 최근 메일보다 **확실한 근거**(서명 0.9 > 발신자 표시 이름 0.8)를 우선. 픽업지는 LLM에게 묻지 않는다(회사명 오인).
+- **화주 질문에 원문을 인용하는 건 규칙이 라벨로 확인한 경우만.** LLM이 짚은 '못 읽은 값'은 담당자 화면에 '확인 필요'로만 보이고,
+  화주에게는 일반 질문으로 묻는다 (실제 사례: 1.7b가 총중량 줄을 인보이스 금액으로 짚어 이상한 질문이 나갔던 문제). 조사는 받침에 맞춰 자동.
+- `LLM_SCOPE=all`(기본): 전 항목 LLM / `missing`: 규칙이 못 찾은 빈 칸만 (느린 PC). LLM이 45초를 넘기거나 꺼져 있으면
+  규칙 결과로 계속 진행(NFR-03). 외부 주소 LLM은 실행 거부(NFR-04).
+
+## 켜는 법 (Windows)
+1. https://ollama.com 설치 → PowerShell: `ollama pull qwen3:8b`
+2. `server\.env`: `EXTRACTION_MODE=hybrid` (LLM 없이: `rules`, 끄기: `off`)
+3. 견적까지 보려면 테스트 요율 등록: `.venv\Scripts\python -m app.seed --sample-rates` (다시 실행해도 중복 안 됨)
+   - 출처: LCL·FOB 예시 견적서(부대비용) + `samples.md` 3번 D선사 월간 운임표(부산 출발 17개 항구 해상운임, POL 부산 가정)
+   - LCL 통관비·보험료는 예시 견적서처럼 최소 금액(₩15,000 / ₩18,000, 비고에 산정식)
+   - 견적이 나오는 조합: **인천→시드니 LCL**, **부산→싱가포르 LCL**(인천 LCL 금액 준용), **부산 40HQ FOB(도착항 무관)**, **부산→월간 운임표 17개 항구 40HQ CIF**
+   - 20ft·냉동 컨테이너는 해상운임은 있지만 국내 부대비용 자료가 없어 "국내 부대비용 요율 없음"으로 보류 (불완전 견적 금지)
+   - `samples.md` 4번 미주 운임은 미등록: 컨테이너 크기 미표기, 같은 구간 복수 선사, 철도 터미널(내륙) 설계 필요
+
+## 정밀도 측정 (NFR-01) — B트랙 핵심 산출물
+```powershell
+cd server
+.\.venv\Scripts\python -m eval.run_eval                  # 룰만
+.\.venv\Scripts\python -m eval.run_eval --mode hybrid    # 룰 + LLM
+.\.venv\Scripts\python -m eval.run_eval --mode hybrid --model qwen2.5:14b-instruct   # 모델 비교
+```
+보고서는 `server/eval/reports/`. **오추출 목록**이 W3–4 "오추출 사례 피드백" 자료.
+
+| 측정 (2026-09-30, 룰만, 평가 세트 24건) | 결과 |
+|---|---|
+| 정밀도 | 100% (338/338) |
+| 채움률 | 92.3% (338/366) |
+| 처리 시간 | 최대 0.1초 |
+
+**모델 비교**: `server\run_benchmark.bat` 더블클릭 (또는 `python -m eval.compare --models qwen3.5:9b qwen3:14b`)
+→ 모델별 정밀도·채움률·시간을 한 표로 비교하고 기준(정밀도 ≥90%, ≤45초, LLM 오류 ≤10%) 통과 모델 중 추천.
+GPU PC 측정 절차는 `docs/LLM_측정_안내.md`.
+
+⚠ **이 숫자는 낙관적이다.** 평가 메일(`eval/dataset.py`)을 룰과 같은 사람이 만들었다.
+실제 정밀도는 룰을 안 본 사람이 쓴 메일을 `eval/cases/`에 넣고 재야 한다 (방법: `eval/cases/README.md`).
+남은 오추출 1건(V06: 회신 문장 "Gross weight is revised to 13,000 KGS")과 문장형 메일(V05, 채움 7/16)이 LLM이 메울 곳.
+
+## 모델 고르기
+- 기본값 `qwen3:8b` — 다국어, **Apache 2.0** (Qwen3 전 크기). GPU 12GB 이상이면 `qwen3:14b`, GPU 없으면 `qwen3:4b`도 측정.
+- Qwen3는 기본이 생각(thinking) 모드라 느리다 → `LLM_THINK=false`(기본값)로 끈다. 생각 모드가 없는 모델은 자동으로 옵션 없이 요청.
+- 후보가 여럿이면 `run_eval --mode hybrid --model …`로 **정밀도·시간을 재서** 고른다. 감으로 고르지 않는다.
+- **GPU 없는 노트북은 60초(NFR-02)를 넘길 수 있다.** 넘으면 룰 결과로 진행되지만(케이스는 멈추지 않음) LLM 효과가 없다.
+  보고서의 케이스별 시간·"LLM 오류: timed out"을 확인할 것. 발주 측 PC 사양 확인 필요.
+
+## 데이터로 관리하는 것 (NFR-06, 코드 수정 없음)
+- `app/extraction/data/fields.json` — 필드별 국·영문 라벨 사전, 필드별 임계치(FR-209), 다품목 섹션 패턴
+- `app/extraction/data/ports.json` — 항구명 → UN/LOCODE (사내 항구 마스터 받으면 교체)
+- 고친 뒤 `pytest` → `test_eval_precision.py`가 정밀도 하락을 잡는다
+
+## DB (`server/app/models.py`)
+- `quote_inputs` — 6장 필드 (정의서 이름·타입 그대로). **filled 값만** 저장
+- `extraction_fields` — 추출할 때마다 21개 필드 전부: 값·근거 원문·점수·방법·상태 (FR-202, NFR-05). `method=manual`은 담당자 수정(FR-206) → 재추출이 덮어쓰지 않음
+
+## API (D트랙 콘솔·A트랙 패널용)
+- `GET /api/cases/{id}/fields` — 필드별 값·근거·점수·상태(filled/review/missing), 검토 필요 값은 `candidate`
+- `POST /api/cases/{id}/fields/{field}` `{"value": …, "actor": …}` — 수동 보정 → 이력 → 검증 재실행
+- `POST /api/cases/{id}/extract` `{"actor": …}` — 다시 추출 (NFR-03). 패널 '항목 추출' 영역의 [다시 추출] 버튼.
+  설정을 바꾼 뒤, LLM 시간 초과로 규칙 결과만 나왔을 때 쓴다. 담당자가 고친 필드는 유지. 실행 중이면 409 (2분 넘게 멈춘 경우는 허용)
+
+## 견적서 형식 (quotation.py) — 발주 측 예시 견적서(LCL·FOB PDF)에 맞춤
+- 양식 XLSX를 **한 페이지 폭에 맞춰** 인쇄 (양식에 이 설정이 없어 F열 회사 주소·DATE·REMARK가 2쪽으로 밀렸음)
+- LCL: `RATE / R/T / AMOUNT`, CARGO DETAIL 끝에 `(1 R/T 기준)` · FOB(FCL): `** POL : BUSAN, KOREA`, `** REQUIRED CNTR : 40HQ' X 1`,
+  `CONTAINER / Q/T / TOTAL` · 그 밖의 FCL: `RATE / Q'TY / AMOUNT`
+- AT COST는 단가~금액 칸을 합쳐 가운데, 쓰지 않은 비용 줄은 숨김, VALIDITY는 `2026년 9월 30일`
+- Subject 상자는 양식에서 도형이라 저장 때 빠짐(openpyxl) → 셀 테두리로 대신 그림
+- 예시와 다른 점: 내륙운송비(TRUCKING) 줄 없음(픽업지별 요율 설계 필요), FOB도 TOTAL 줄을 둠(양식 기준)
+- **PDF**: LibreOffice(무료)가 있으면 같은 XLSX를 PDF로 변환해 함께 저장 → 송부 초안에 PDF·XLSX 둘 다 첨부 (MUST-SHIP ④).
+  없으면 XLSX만 (`quote.pdfNote`에 사유). 경로는 `SOFFICE_PATH`, 끄기는 `QUOTE_PDF=false`.
+  LibreOffice 라이선스는 MPL 2.0(설치형 외부 프로그램, 코드 의존성 아님) — 팀 라이선스 규칙과 맞는지 확인 필요
+
+## 찾았지만 못 읽은 값은 버리지 않는다 (2026-09-30)
+이전에는 규칙·LLM이 값을 찾아도 형식(숫자+단위, 금액+통화 등)에 안 맞으면 **기록 없이 버렸다** (예: 통화 없는 금액, 단위 없는 무게).
+- **해석 경로 하나**: LLM 결과도 `rules.parse_value`(규칙과 같은 해석기)를 거친다 → 규칙을 고치면 LLM 해석도 같이 좋아진다
+- **해석 실패 = 확인 필요**: 저장하지 않고(`reason: UNPARSED`, 점수 0.5) 패널에 원문과 함께 표시, 화주에게는 원문을 짚어
+  "「예상 총중량: 오백 킬로 정도」로 적어 주셨는데 정확히 읽지 못했습니다. 다시 알려 주세요 (500kg 형식)"로 질문.
+  형식 예시는 `validation_rules.json`의 `formatHints`. 제대로 읽힌 값이 있으면 항상 그쪽을 쓴다.
+- **놓친 표현 모아 보기**: `python -m app.extraction.report` / `GET /api/extraction/review-report` — 항목별 원문 예시.
+  자주 나오는 표현을 사전에 추가하면 다음부터 자동으로 읽는다. 정밀도 보고서에도 같은 목록.
+- 지원하지 않는 조건(FCA 등)은 "현재 FOB·CIF·DDP·EXW로 견적" 질문으로
+- 보강: 가로·세로·높이 규격, 하이큐브 단독(HC·HQ 단독은 대수·'컨테이너'가 붙을 때만 — 본사 HQ 오인 방지), 나무 박스→Crate, 숫자만 있는 수량
+
+## 유연한 표현 처리 (2026-09-30)
+실제 회신에서 흔한 형태를 룰이 직접 읽는다 (LLM 없이도, 정밀도 100%·채움률 93.3%로 오히려 개선):
+- **번호로만 답한 회신** `1. 2026-10-20` — 보완 요청을 만들 때 질문별 항목을 이력에 남기고(`questionFields`), 회신의 번호 줄을 그 항목으로 읽는다.
+  담당자가 고친 질문은 항목을 모르니 건너뛴다. 초안 본문에 "번호에 맞춰 답만 적어 주셔도 됩니다" 안내.
+- 구분자 `:` 외에 `=`, `|`(표 붙여넣기), ` - `(앞뒤 공백) · 라벨과 값이 다른 줄 · 콜론 없는 문장(`총중량은 500kg입니다`, `선적항 부산`)
+  — 콜론 없는 문장은 형태가 분명한 값(숫자·단위·날짜·항구·코드)만 받는다 (품목 같은 자유 글은 오추출 위험)
+- 인보이스 금액·통화가 다른 줄 (`인보이스 금액: 8,500` / `통화: USD`), 금액·통화 질문은 하나로
+- 말투 정리: `T/T로 할 예정입니다` → `T/T`
+- 연도 없는 준비일(`10월 20일`, `Oct 20`)은 다가오는 날짜로 (확신도 0.8, 막 지난 날은 올해 → 검증에서 '지난 날짜'로 질문).
+  `10/20` 같은 숫자 표기는 월/일 순서가 모호해 받지 않는다
+
+## 발주 측 요율표 (docs/양식/샘플_요율표.xlsx, 2026-09-30)
+`OceanFreight`·`Surcharges` 시트를 **그대로 올린다** (`python -m app.rates import 샘플_요율표.xlsx` / `POST /api/rates/import`, 시트 이름으로 형식 자동 판별).
+`rates` 테이블에 없던 10개 칸을 모두 담았다 (기존 DB에는 서버 시작 시 빈 칸으로 자동 추가 — `db.add_missing_columns`):
+
+| 칸 | 담은 곳 | 쓰임 |
+|---|---|---|
+| rate_id | `rates.source_ref` ('OceanFreight#1') | 금액별 근거 추적 (견적 결과 `lines[].source`, FR-509) |
+| carrier | `rates.carrier` | **선사 지정 시 그 선사, 미지정 시 최저가** (발주 측 규칙). 'ANY'는 선사 무관 |
+| direction | `rates.direction` | FOB는 도착지(DEST) 비용·해상운임 제외 |
+| rate_pct · min_amount | `rates.rate_pct` · `min_amount` (basis `PERCENT`) | 보험: 화물가액 × 0.2%, 최저 USD 30 (인보이스 통화가 다르면 실비) |
+| etd · eta · transit_days | `rates.etd`·`eta`·`transit_days` | 견적서 비고 'ETD / ETA (선사)', transitTime (FR-507) |
+| free_time_dem · free_time_det | `rates.free_time_dem`·`free_time_det` | freeTimeDem/Det — 고른 운임 행(선사별) 우선, 없으면 구간 룰 |
+
+계산 규칙도 맞췄다: 요율은 **선적일(화물 준비일) 기준**으로 고른다 (GRI 인상 후반기 행), 'ALL'·'ANY'·'-'는 '모두'.
+**검증: 발주 측 '조회예시' 시트(CNSHA→KRPUS 20GP×1, CIF, HMM, 10/05, USD 15,000 → TOTAL USD 890, ETD 10/06·ETA 10/08, Free 7일)를
+메일 한 통으로 그대로 재현** (`test_client_lookup_example_is_reproduced`).
+- 선사는 6장에 없는 입력이라 추출 보조값(`carrier`)으로 읽는다 ("선사: HMM"). 고객이 선사를 안 적으면 최저가.
+- 확인 필요(발주 측): CIF 예시에 도착지 THC가 포함돼 있어 그대로 따름 / FOB는 도착지 비용을 빼는 것으로 가정
+
+## 첨부 표 읽기 (FR-204, 2026-09-30)
+패킹리스트·인보이스는 대부분 표다. 표를 규칙이 읽는 '이름<TAB>값' 줄로 바꾼다 (`attachments.table_lines`).
+- PDF는 화면 배치대로 읽는다(pypdf layout) — 기본 방식은 표를 '값 칸 전부 → 이름 칸 전부'로 흩어 놓아 짝이 깨지고,
+  '품목' 다음 줄의 '수량'을 품목으로 읽는 오추출까지 났다 (한글 패킹리스트 PDF로 발견)
+- 세로 표 `품목 (Commodity) | 전자부품` → 한 줄 · 가로 표 `Description | Q'ty | CBM | G.W` → **TOTAL 줄**(없으면 값 줄이 하나일 때)과 짝지음.
+  품목 줄이 여럿이고 합계가 없으면 짝짓지 않는다 (어느 줄 값인지 모름)
+- 라벨만 있는 줄 다음 줄이 또 라벨이면 값으로 쓰지 않는다
+- 스캔(이미지) PDF는 글자가 없어 읽지 못한다 (OCR 미포함, FR-204 선택 사항)
+
+## 실전 운영 기능 (2026-09-30)
+- **컨테이너 대수**: "40HQ 2대"·"2 x 40HQ"·"한 대" 인식 → CNTR당 비용 × 대수. 대수가 없으면 부피(내부 용적 × 0.88)·중량으로 필요한 대수를 산정하고
+  견적서 비고에 근거를 적는다. 6장에 대수 필드가 없어 `quote_inputs`가 아니라 추출 결과 보조값(`containerCount`)으로 둔다.
+  중량 초과 질문은 대수가 적혀 있을 때만 '1대당'으로.
+- **요율 엑셀** (`app/rates.py`): 양식·내려받기·올리기(`/api/rates/*`, `python -m app.rates`). 같은 '출처'는 통째로 교체, 틀린 줄이 있으면 반영 안 함.
+- **검증 룰 데이터화**: `app/data/validation_rules.json` — 필수 항목·위험물 키워드·허용 오차·질문 문구
+- **설정 점검**: `python -m app.diagnostics`, `GET /api/health/detail`
+- **담당자·관리자 사용 안내**: `docs/담당자_사용안내.md` (NFR-07)
+
+## A트랙 임시 부분을 추출·검증 결과로 연결함 (2026-09-29)
+- 패널 '항목 추출' 영역: `result.fields` 형식을 읽어 값 표시, 확신 낮은 값은 "(확인 필요)", 마우스를 올리면 근거 원문
+- 패널 '보완 요청 문항': 검증 결과 문항을 자동으로 채움 (담당자가 고치면 그 내용 유지, 다른 메일로 가면 초기화)
+- 보완 요청 초안: 문항을 비워 보내면 검증 결과 문항 사용 (FR-305)
+- 초안 받는 사람: 추출한 `contactEmail`·`contactName` 우선 (FR-208)
+- **[견적서 송부 초안] 한 번에 첨부까지** (Mailbox 1.15+, 현재 Outlook 웹): 고객 메일에 대한 **회신 창**을 견적서 파일(base64)을 붙인 채로 연다.
+  새 메일 창은 공개 URL로만 첨부할 수 있어 localhost 파일을 못 붙였다. 회신 창의 제목은 Outlook이 정하므로 케이스 번호를 제목에 넣고
+  초안함에 저장하려면 그 창에서 [앱] → LEONA (이미 붙은 견적서는 다시 붙이지 않음). 1.15 미만은 기존 방식 그대로.
+- `CLAUDE.md`·`docs/트랙간_전달사항.md`의 "B·C 연결 전 임시" 기록은 A트랙 문서라 고치지 않았다 → A트랙이 갱신
+
+## 다른 트랙에 영향
+- **C트랙**: 추출 결과 JSON의 `fields[*].status == "review"`는 "확인 필요" 문항으로 물으면 된다(`validation.py`에 예시 구현).
+  `notes`의 `MULTIPLE_INCOTERMS`·`PORT_UNMAPPED`(후보 포함)도 참고.
+- **A트랙**: 인용문 분리는 B가 하므로 원문을 계속 자르지 않고 넘기면 된다. 초안 받는 사람은 `contactEmail`로 바꿔도 된다(FR-208).
+- **D트랙**: 위 두 API로 필드 화면(근거·점수 표시, 수정)을 만들 수 있다.
+
+## 아직 안 된 것
+- 실제 LLM으로 측정 안 함(개발 환경에서 Ollama 실행 불가) → 팀 PC에서 `--mode hybrid` 측정 필요
+- 블라인드 평가 메일 0건 (평가 세트 24건은 모두 룰 작성자가 만든 것 — MUST-SHIP ① 시연 샘플 수는 충족)
+- 스캔 PDF OCR(FR-204 선택 사항) 없음

@@ -1,0 +1,238 @@
+{
+  "_comment": "FR-203 항구명 → UN/LOCODE (결정형). 사내 항구 마스터를 받으면 이 파일을 교체한다. 코드는 사내 마스터로 재확인 필요.",
+  "KRPUS": [
+    "부산",
+    "부산항",
+    "부산북항",
+    "부산신항",
+    "BUSAN",
+    "PUSAN",
+    "BUSAN NEW PORT"
+  ],
+  "KRINC": [
+    "인천",
+    "인천항",
+    "INCHEON",
+    "INCHON"
+  ],
+  "KRKAN": [
+    "광양",
+    "광양항",
+    "GWANGYANG",
+    "KWANGYANG"
+  ],
+  "KRPTK": [
+    "평택",
+    "평택항",
+    "PYEONGTAEK"
+  ],
+  "KRUSN": [
+    "울산",
+    "울산항",
+    "ULSAN"
+  ],
+  "AUSYD": [
+    "시드니",
+    "SYDNEY"
+  ],
+  "AUMEL": [
+    "멜버른",
+    "멜번",
+    "MELBOURNE"
+  ],
+  "AUBNE": [
+    "브리즈번",
+    "BRISBANE"
+  ],
+  "CNSHA": [
+    "상하이",
+    "상해",
+    "SHANGHAI"
+  ],
+  "CNNGB": [
+    "닝보",
+    "NINGBO"
+  ],
+  "CNTAO": [
+    "칭다오",
+    "청도",
+    "QINGDAO"
+  ],
+  "CNSZX": [
+    "선전",
+    "심천",
+    "SHENZHEN"
+  ],
+  "CNTXG": [
+    "톈진",
+    "천진",
+    "TIANJIN",
+    "XINGANG"
+  ],
+  "HKHKG": [
+    "홍콩",
+    "HONG KONG",
+    "HONGKONG"
+  ],
+  "TWKEL": [
+    "지룽",
+    "기륭",
+    "KEELUNG",
+    "JILONG"
+  ],
+  "TWKHH": [
+    "가오슝",
+    "KAOHSIUNG"
+  ],
+  "JPTYO": [
+    "도쿄",
+    "동경",
+    "TOKYO"
+  ],
+  "JPYOK": [
+    "요코하마",
+    "YOKOHAMA"
+  ],
+  "JPOSA": [
+    "오사카",
+    "OSAKA"
+  ],
+  "SGSIN": [
+    "싱가포르",
+    "싱가폴",
+    "SINGAPORE"
+  ],
+  "VNSGN": [
+    "호치민",
+    "HO CHI MINH",
+    "HOCHIMINH"
+  ],
+  "VNHPH": [
+    "하이퐁",
+    "HAIPHONG",
+    "HAI PHONG"
+  ],
+  "THLCH": [
+    "램차방",
+    "LAEM CHABANG"
+  ],
+  "MYPKG": [
+    "포트클랑",
+    "PORT KELANG",
+    "PORT KLANG"
+  ],
+  "INMAA": [
+    "첸나이",
+    "CHENNAI"
+  ],
+  "INNSA": [
+    "나바셰바",
+    "NHAVA SHEVA"
+  ],
+  "AEJEA": [
+    "제벨알리",
+    "JEBEL ALI"
+  ],
+  "SAJED": [
+    "제다",
+    "JEDDAH"
+  ],
+  "TRMER": [
+    "메르신",
+    "MERSIN"
+  ],
+  "USLAX": [
+    "로스앤젤레스",
+    "LA",
+    "LOS ANGELES"
+  ],
+  "USLGB": [
+    "롱비치",
+    "LONG BEACH"
+  ],
+  "USNYC": [
+    "뉴욕",
+    "NEW YORK"
+  ],
+  "USSAV": [
+    "서배너",
+    "사바나",
+    "SAVANNAH"
+  ],
+  "USCHS": [
+    "찰스턴",
+    "CHARLESTON"
+  ],
+  "CAVAN": [
+    "밴쿠버",
+    "VANCOUVER"
+  ],
+  "NLRTM": [
+    "로테르담",
+    "ROTTERDAM"
+  ],
+  "DEHAM": [
+    "함부르크",
+    "HAMBURG"
+  ],
+  "BEANR": [
+    "앤트워프",
+    "ANTWERP"
+  ],
+  "ITGOA": [
+    "제노바",
+    "GENOA",
+    "GENOVA"
+  ],
+  "GBFXT": [
+    "펠릭스토우",
+    "FELIXSTOWE"
+  ],
+  "INKAT": [
+    "카투팔리",
+    "KATTUPALLI"
+  ],
+  "INPAV": [
+    "피파바브",
+    "PIPAVAV"
+  ],
+  "INMUN": [
+    "문드라",
+    "MUNDRA"
+  ],
+  "PKKHI": [
+    "카라치",
+    "KARACHI"
+  ],
+  "AEKLF": [
+    "코르팍칸",
+    "KHOR FAKKAN"
+  ],
+  "OMSOH": [
+    "소하르",
+    "SOHAR"
+  ],
+  "SAKAC": [
+    "킹압둘라",
+    "KING ABDULLAH",
+    "KING ABDULLAH PORT"
+  ],
+  "EGSOK": [
+    "소크나",
+    "SOKHNA",
+    "AIN SOKHNA"
+  ],
+  "JOAQJ": [
+    "아카바",
+    "AQABA"
+  ],
+  "SYLTK": [
+    "라타키아",
+    "LATTAKIA",
+    "LATAKIA"
+  ],
+  "THBKK": [
+    "방콕",
+    "BANGKOK"
+  ]
+}
