@@ -3,7 +3,7 @@
 pipeline.py의 Validator 규격 구현. LLM을 쓰지 않는다 (정합성 검증·단가 계산은 룰 베이스 — 발주 측 승인 사항).
 
 판정 결과 → 케이스 상태 (6장 caseStatus)
-  - 다품목(FR-210) 또는 위험물 키워드 감지     → 보류   (담당자 수동 처리)
+  - 다품목(FR-210) 또는 위험물·냉동·특수화물 키워드 감지(FR-308) → 보류   (담당자 수동 처리)
   - 화주에게 물어볼 항목이 있음               → 정보부족 (questions가 보완 요청 초안 문항이 된다, FR-304·305)
   - 전부 충족 + 요율 있음                     → 계산완료 (견적서 XLSX 생성 → A트랙 송부 초안이 첨부)
   - 전부 충족 + 요율 없음                     → 보류   (FR-501: 요율 없으면 견적을 만들지 않는다)
@@ -46,6 +46,20 @@ def josa(word: str, with_final: str, without_final: str) -> str:
     return with_final
 
 
+SEVERITIES = ("Block", "Warn", "Info")
+
+
+def severity(code: str) -> str:
+    """문제 코드 → 심각도 Block/Warn/Info (FR-301). validation_rules.json의 "severity"로 바꾼다 (NFR-06).
+
+    정의서 2장: Block은 견적 산출 불가, Warn은 산출 후 사람 검수 필요, Info는 참고.
+    화주 문항이나 보류 사유가 있으면 견적을 만들지 않으므로 그런 코드는 Block이어야 한다 (Warn·Info로 두지 말 것).
+    """
+    table = rules().get("severity") or {}
+    level = table.get(code) or table.get("default") or "Block"
+    return level if level in SEVERITIES else "Block"
+
+
 def today_kst() -> date:
     return datetime.now(KST).date()
 
@@ -60,6 +74,22 @@ def detect_dg(commodity: str | None) -> list[str]:
     return hits
 
 
+
+
+def detect_special(commodity: str | None) -> list[str]:
+    """냉동·냉장·초과규격 등 특수화물 키워드 (FR-308). 영문 키워드는 단어 단위로만 본다 (OOG가 GOOGLE에 걸리지 않게)."""
+    if not commodity:
+        return []
+    upper = commodity.upper()
+    hits = []
+    for keyword in rules().get("specialCargoKeywords") or []:
+        k = keyword.upper()
+        if k.isascii():
+            if re.search(rf"(?<![A-Z]){re.escape(k)}(?![A-Z])", upper):
+                hits.append(keyword)
+        elif k in upper:
+            hits.append(keyword)
+    return hits
 
 
 def check(session: Session, qi: QuoteInput, notes: list[dict] | None = None, today: date | None = None,
@@ -86,7 +116,8 @@ def check(session: Session, qi: QuoteInput, notes: list[dict] | None = None, tod
     issues: list[dict] = []
 
     def add(field: str, code: str, message: str, ask: str | None = None, **extra):
-        issues.append({"field": field, "code": code, "message": message, "question": ask, **extra})
+        issues.append({"field": field, "code": code, "severity": severity(code), "message": message,
+                       "question": ask, **extra})
 
     note_codes = {(n["field"], n["code"]): n for n in notes}
 
@@ -159,6 +190,19 @@ def check(session: Session, qi: QuoteInput, notes: list[dict] | None = None, tod
                 f"{container.code} 1대 허용중량 {container.max_gross_kg:,.0f}kg 초과 (1대당 {per:,.0f}kg)",
                 f"총중량 {qi.grossWeightKg:,.0f}kg이 {container.code} {container_count}대 허용중량을 넘습니다. "
                 f"컨테이너 규격·대수를 확인해 주세요. (Gross weight exceeds the limit of {container_count} x {container.code}.)")
+    # 허용중량 자료가 없는 컨테이너(예: 40RF)는 초과 검사를 못 한다 → 담당자 참고용으로만 알린다 (화주 문항 아님)
+    if container and container.code != "LCL" and not container.max_gross_kg and qi.grossWeightKg:
+        add("grossWeightKg", "NO_WEIGHT_LIMIT",
+            f"{container.code} 허용중량 자료가 없어 중량 초과 검사를 하지 않았습니다 (총중량 {qi.grossWeightKg:,.0f}kg)")
+    # 부피 초과: 중량과 같이 메일에 대수가 적혀 있을 때만 묻는다. 대수가 없으면 견적에서 필요한 대수를 산정한다.
+    cbm = qi.totalCbm
+    if cbm is None and has_box and qi.qty:
+        cbm = qi.boxL * qi.boxW * qi.boxH / 1e9 * qi.qty
+    if container and container.max_cbm and cbm and container_count and cbm > container.max_cbm * container_count:
+        add("totalCbm", "OVER_VOLUME",
+            f"{container.code} {container_count}대 용적 {container.max_cbm * container_count:,.0f}CBM 초과 (화물 {cbm:,.2f}CBM)",
+            f"화물 부피 {cbm:,.2f}CBM이 {container.code} {container_count}대에 실을 수 있는 부피를 넘습니다. "
+            f"컨테이너 규격·대수를 확인해 주세요. (Cargo volume exceeds the capacity of {container_count} x {container.code}.)")
 
     if has_box and qi.qty and qi.totalCbm:
         calculated = qi.boxL * qi.boxW * qi.boxH / 1e9 * qi.qty
@@ -198,10 +242,17 @@ class RuleValidator:
         questions = [i["question"] for i in issues if i["question"]]
         hold: list[dict] = []
         if extraction.get("multipleItems"):
-            hold.append({"code": "MULTIPLE_ITEMS", "message": "다품목 — 수동 처리 대상 (FR-210)"})
+            hold.append({"code": "MULTIPLE_ITEMS", "severity": severity("MULTIPLE_ITEMS"), "message": "다품목 — 수동 처리 대상 (FR-210)"})
         dg = detect_dg(qi.commodity)
         if dg and rules().get("holdOnDangerousGoods", True):
-            hold.append({"code": "DANGEROUS_GOODS", "message": f"위험물 가능성 키워드: {', '.join(dg)} — 담당자 확인 필요"})
+            hold.append({"code": "DANGEROUS_GOODS", "severity": severity("DANGEROUS_GOODS"), "message": f"위험물 가능성 키워드: {', '.join(dg)} — 담당자 확인 필요"})
+        special = detect_special(qi.commodity)
+        # 냉동·특수 컨테이너(40RF 등)로 요청한 건도 자동 견적 범위 밖이다 (정의서 3장 범위 제외, FR-308)
+        if qi.containerType in (rules().get("specialContainers") or []):
+            special.append(f"{qi.containerType} 컨테이너")
+        if special and rules().get("holdOnSpecialCargo", True):
+            hold.append({"code": "SPECIAL_CARGO", "severity": severity("SPECIAL_CARGO"),
+                         "message": f"냉동·특수화물 가능성: {', '.join(special)} — 담당자 처리 (FR-308)"})
 
         result: dict = {"issues": issues, "questions": questions, "hold": hold, "quote": None}
         if hold:
@@ -213,9 +264,12 @@ class RuleValidator:
             if quote is None:
                 case.status = "보류"
                 _rows, reason = quotation.rates_with_reason(session, qi, today_kst())
-                hold.append({"code": "NO_RATE", "message": reason or f"요율 없음 {qi.pol}→{qi.pod} {qi.containerType} (FR-501)"})
+                hold.append({"code": "NO_RATE", "severity": severity("NO_RATE"), "message": reason or f"요율 없음 {qi.pol}→{qi.pod} {qi.containerType} (FR-501)"})
             else:
                 case.status = "계산완료"
                 result["quote"] = quote
         result["status"] = case.status
+        levels = [i["severity"] for i in issues + hold]
+        result["severityCount"] = {level: levels.count(level) for level in SEVERITIES}
+        result["questionCount"] = len(questions)  # 보완 요청 초안의 문항 수가 이 값과 같아야 한다 (FR-305)
         return result

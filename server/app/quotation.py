@@ -7,7 +7,7 @@
   다시 계산하면 이전 파일은 quote-history/로 옮긴다 (송부 초안에 옛 버전이 같이 붙지 않도록).
 - 케이스 ID를 Subject 줄에 표기한다 (FR-102: 화면·메일 제목·견적서 동일 표기).
 
-PDF는 LibreOffice(있을 때만)로 같은 XLSX를 변환해 옆에 둔다 → 송부 초안에 PDF·XLSX가 함께 첨부된다 (MUST-SHIP ④).
+PDF는 LibreOffice로 같은 XLSX를 변환하고, 없거나 실패하면 내장 엔진(quote_pdf.py)으로 만들어 옆에 둔다 → 송부 초안에 PDF·XLSX가 함께 첨부된다 (MUST-SHIP ④).
 """
 
 import io
@@ -356,10 +356,27 @@ def find_soffice() -> str | None:
 
 
 def to_pdf(xlsx: bytes) -> tuple[bytes | None, str | None]:
-    """양식 XLSX → PDF. LibreOffice가 없거나 실패하면 (None, 사유) — 견적서 XLSX는 그대로 쓴다."""
+    """양식 XLSX → PDF. LibreOffice가 있으면 그것으로, 없거나 실패하면 내장 엔진(quote_pdf)으로 만든다.
+
+    둘 다 실패하면 (None, 사유) — 견적서 XLSX는 그대로 쓴다.
+    """
+    pdf, reason = _soffice_pdf(xlsx)
+    if pdf:
+        return pdf, None
+    try:
+        from . import quote_pdf  # reportlab이 없어도 견적(XLSX)은 계속 만들 수 있게 여기서 불러온다
+
+        return quote_pdf.render_pdf(xlsx), f"{reason} — 내장 엔진으로 PDF를 만들었습니다"
+    except Exception as error:  # noqa: BLE001 — PDF 때문에 견적이 실패하면 안 된다
+        log.warning("builtin pdf failed: %s", error)
+        return None, f"{reason}, 내장 엔진도 실패 ({error.__class__.__name__}) — XLSX만 생성"
+
+
+def _soffice_pdf(xlsx: bytes) -> tuple[bytes | None, str | None]:
+    """LibreOffice 변환. 못 만들면 (None, 사유)."""
     soffice = find_soffice()
     if soffice is None:
-        return None, "LibreOffice가 없어 PDF를 만들지 않았습니다 (XLSX만 생성)"
+        return None, "LibreOffice 없음"
     with tempfile.TemporaryDirectory(prefix="leona-pdf-") as tmp:
         src = Path(tmp) / "quote.xlsx"
         src.write_bytes(xlsx)
@@ -372,8 +389,8 @@ def to_pdf(xlsx: bytes) -> tuple[bytes | None, str | None]:
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             log.warning("pdf conversion failed: %s", error)
-            return None, f"PDF 변환 실패 ({error.__class__.__name__}) — XLSX만 생성"
+            return None, f"LibreOffice 변환 실패 ({error.__class__.__name__})"
         out = Path(tmp) / "quote.pdf"
         if not out.exists():
-            return None, "PDF 변환 결과가 없습니다 — XLSX만 생성"
+            return None, "LibreOffice 변환 결과 없음"
         return out.read_bytes(), None

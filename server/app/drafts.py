@@ -60,6 +60,25 @@ def validation_questions(case: Case) -> list[str]:
     return []
 
 
+def question_check(case: Case, questions: list[str]) -> dict | None:
+    """초안 문항이 가장 최근 검증 결과의 문항과 같은지 (FR-305: 임의 항목 추가·누락 없음).
+
+    검증이 아직 돌지 않았으면 비교할 기준이 없어 None. 담당자가 문항을 고칠 수 있으므로(FR-304) 막지는 않고,
+    무엇이 더해지고 빠졌는지 돌려준다 → 패널이 경고로 보여 주고 이력에도 남는다.
+    """
+    for event in reversed(case.events):
+        if event.event_type == "PIPELINE_RUN":
+            validation = json.loads(event.detail or "{}").get("validation")
+            if not validation or "questions" not in validation:
+                return None
+            expected = [q for q in validation["questions"] if q]
+            added = [q for q in questions if q not in expected]
+            missing = [q for q in expected if q not in questions]
+            return {"matches": not added and not missing and len(questions) == len(expected),
+                    "expected": len(expected), "actual": len(questions), "added": added, "missing": missing}
+    return None
+
+
 def _record(session: Session, case: Case, kind: str, actor: str | None, detail: dict) -> None:
     session.add(
         CaseEvent(
@@ -101,11 +120,14 @@ def supplement_draft(session: Session, case: Case, questions: list[str], actor: 
     )
     # 몇 번 질문이 어떤 항목인지 남긴다 → 화주가 '1. 2026-10-20'처럼 번호로만 답해도 추출이 알아본다
     by_text = {i["question"]: i["field"] for i in validation_issues(case)}
+    check = question_check(case, questions)
     _record(session, case, "SUPPLEMENT", actor, {
         "subject": subject, "questionCount": len(questions), "questions": questions,
         "questionFields": [by_text.get(q) for q in questions],  # 담당자가 고친 질문은 None
+        "questionCheck": check,
     })
-    return DraftOut(kind="SUPPLEMENT", case_id=case.case_id, to=_recipient(case), subject=subject, html_body=body, attachments=[])
+    return DraftOut(kind="SUPPLEMENT", case_id=case.case_id, to=_recipient(case), subject=subject, html_body=body,
+                    attachments=[], question_check=check)
 
 
 MAIL_EVENT_TYPES = {"DRAFT_SAVED", "MAIL_SENT"}

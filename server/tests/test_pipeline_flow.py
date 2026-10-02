@@ -223,6 +223,34 @@ def test_supplement_draft_uses_validation_questions_when_empty(client, connect):
     assert edited["htmlBody"].count("<li>") == 1  # 담당자가 고친 문항이 있으면 그것을 쓴다
 
 
+def test_supplement_draft_reports_question_mismatch(client, connect):
+    """FR-305: 초안 문항이 검증 결과와 같은지 확인해 돌려주고 이력에 남긴다 (담당자 수정은 막지 않는다)."""
+    case = create(client, eml("01_lcl_request.eml"))
+    expected = case["extraction"]["validation"]["questions"]
+    assert case["extraction"]["validation"]["questionCount"] == len(expected) >= 2
+    url = f"/api/cases/{case['caseId']}/drafts/supplement"
+    same = client.post(url, json={"questions": []}).json()
+    assert same["questionCheck"] == {"matches": True, "expected": len(expected), "actual": len(expected),
+                                     "added": [], "missing": []}
+    edited = client.post(url, json={"questions": [expected[0], "직접 쓴 문항"]}).json()
+    check = edited["questionCheck"]
+    assert check["matches"] is False and check["added"] == ["직접 쓴 문항"] and check["missing"] == expected[1:]
+    events = client.get(f"/api/cases/{case['caseId']}").json()["events"]
+    assert events[-1]["detail"]["questionCheck"]["matches"] is False
+
+
+def test_issues_have_severity(client, connect):
+    """FR-301: 문제마다 심각도(Block/Warn/Info)가 붙고, 누락은 Block이다."""
+    validation_result = create(client, eml("01_lcl_request.eml"))["extraction"]["validation"]
+    issues = validation_result["issues"]
+    assert issues and all(i["severity"] in ("Block", "Warn", "Info") for i in issues)
+    missing = [i for i in issues if i["code"] == "MISSING"]
+    assert missing and all(i["severity"] == "Block" for i in missing)
+    # 정의서 2장: Block = 견적 산출 불가. 화주 문항이 있으면 견적을 만들지 않으므로 전부 Block이어야 한다
+    assert all(i["severity"] == "Block" for i in issues if i["question"])
+    assert sum(validation_result["severityCount"].values()) == len(issues) + len(validation_result["hold"])
+
+
 def test_draft_recipient_uses_extracted_contact(client, connect):
     body = "품목: 노트\n감사합니다.\n김민수 대리\n㈜한빛무역"
     case = create(client, text_mail(body, sender="ms.kim@hanbit.example.com"))
@@ -341,19 +369,38 @@ def test_quote_pdf_is_made_with_libreoffice(client, connect, monkeypatch):
     assert sorted(a["filename"] for a in draft["attachments"]) == sorted([pdf.name, f"{case['caseId']}_견적서.xlsx"])
 
 
-def test_quote_without_libreoffice_still_makes_xlsx(client, connect, monkeypatch):
+def test_quote_without_libreoffice_uses_builtin_pdf(client, connect, monkeypatch):
+    """LibreOffice가 없어도 XLSX와 PDF(내장 엔진)가 함께 만들어진다 (MUST-SHIP ④)."""
     from app import quotation
 
     monkeypatch.setattr(settings, "quote_pdf", True)
     monkeypatch.setattr(quotation, "find_soffice", lambda: None)
     case = create(client, text_mail(FULL_LCL))
     quote = case["extraction"]["validation"]["quote"]
-    assert quote["pdf"] is None and "LibreOffice" in quote["pdfNote"] and case["status"] == "계산완료"
+    assert case["status"] == "계산완료" and quote["file"].endswith(".xlsx")
+    assert quote["pdf"] and quote["pdf"].endswith(".pdf")
+    assert "LibreOffice" in quote["pdfNote"] and "내장 엔진" in quote["pdfNote"]
+    assert (settings.storage_dir / quote["pdf"]).exists()
+
+
+def test_quote_still_makes_xlsx_if_pdf_fails(client, connect, monkeypatch):
+    """PDF를 어떤 방법으로도 못 만들어도 견적은 XLSX로 완료된다 (기존 동작 유지)."""
+    from app import quotation, quote_pdf
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("pdf engine down")
+
+    monkeypatch.setattr(settings, "quote_pdf", True)
+    monkeypatch.setattr(quotation, "find_soffice", lambda: None)
+    monkeypatch.setattr(quote_pdf, "render_pdf", broken)
+    case = create(client, text_mail(FULL_LCL))
+    quote = case["extraction"]["validation"]["quote"]
+    assert case["status"] == "계산완료" and quote["file"].endswith(".xlsx")
+    assert quote["pdf"] is None and "XLSX만 생성" in quote["pdfNote"]
 
 
 @pytest.mark.parametrize("container,reason", [
     ("20FT GP", "국내 부대비용"),  # 해상운임은 있지만 20ft 부대비용 자료 없음 → 불완전 견적 금지
-    ("40' REEFER", "국내 부대비용"),
 ])
 def test_container_without_local_charges_is_held(client, connect, container, reason):
     case = create(client, text_mail(FCL_SG.replace("40HQ 1대", container).replace("48CBM", "25CBM")
@@ -362,10 +409,13 @@ def test_container_without_local_charges_is_held(client, connect, container, rea
     assert case["status"] == "보류" and reason in hold[0]["message"]
 
 
-def test_reefer_not_served_port_is_held(client, connect):
-    body = FCL_SG.replace("40HQ 1대", "40RF 1대").replace("싱가포르", "제벨알리")  # 표에서 '-' (취급 안 함)
-    case = create(client, text_mail(body))
-    assert case["status"] == "보류" and "요율" in case["extraction"]["validation"]["hold"][0]["message"]
+@pytest.mark.parametrize("container,port", [("40RF 1대", "싱가포르"), ("40' REEFER", "싱가포르"), ("40RF 1대", "제벨알리")])
+def test_reefer_container_is_held_for_staff(client, connect, container, port):
+    """냉동 컨테이너 요청은 요율이 있든 없든 자동 견적하지 않고 담당자 처리로 넘긴다 (정의서 3장 범위 제외, FR-308)."""
+    case = create(client, text_mail(FCL_SG.replace("40HQ 1대", container).replace("싱가포르", port)))
+    hold = case["extraction"]["validation"]["hold"]
+    assert case["status"] == "보류" and hold[0]["code"] == "SPECIAL_CARGO" and "40RF" in hold[0]["message"]
+    assert case["extraction"]["validation"]["quote"] is None
 
 
 # ------------------------------------------------------------------ 컨테이너 대수 (금액이 대수만큼 늘어야 한다)
@@ -395,6 +445,30 @@ def test_over_weight_uses_weight_per_container(client, connect, stated, asked):
     case = create(client, text_mail(body))
     codes = {i["code"] for i in case["extraction"]["validation"]["issues"]}
     assert ("OVER_WEIGHT" in codes) is asked
+
+
+def test_over_volume_with_stated_count(client, connect):
+    """FR-302: 적힌 대수로 실을 수 없는 부피면 묻는다 (40HQ 1대 = 76CBM)."""
+    case = create(client, text_mail(FCL_SG.replace("48CBM", "90CBM")))
+    codes = {i["code"] for i in case["extraction"]["validation"]["issues"]}
+    assert "OVER_VOLUME" in codes and case["status"] == "정보부족"
+    fits = create(client, text_mail(FCL_SG.replace("48CBM", "90CBM").replace("40HQ 1대", "40HQ 2대")))
+    assert "OVER_VOLUME" not in {i["code"] for i in fits["extraction"]["validation"]["issues"]}
+
+
+def test_container_without_weight_limit_is_info_only(client, connect):
+    """허용중량 자료가 없는 컨테이너(40RF)는 검사를 못 했다고 담당자에게만 알린다 (화주 문항 아님)."""
+    case = create(client, text_mail(FCL_SG.replace("40HQ 1대", "40RF 1대")))
+    note = [i for i in case["extraction"]["validation"]["issues"] if i["code"] == "NO_WEIGHT_LIMIT"]
+    assert note and note[0]["severity"] == "Info" and note[0]["question"] is None
+
+
+@pytest.mark.parametrize("commodity,held", [("냉동 만두", True), ("스프링노트", False)])
+def test_special_cargo_is_held(client, connect, commodity, held):
+    """FR-308: 냉동·특수화물 키워드가 있으면 자동 견적을 멈추고 담당자 처리로 넘긴다."""
+    case = create(client, text_mail(FULL_LCL.replace("스프링노트", commodity)))
+    codes = [h["code"] for h in case["extraction"]["validation"]["hold"]]
+    assert ("SPECIAL_CARGO" in codes) is held and (case["status"] == "보류") is held
 
 
 def test_validation_rules_are_data(client, connect, monkeypatch):
