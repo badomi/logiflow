@@ -229,6 +229,17 @@
       "currency",
       "ccy",
       "invoice currency"
+    ],
+    "carrier": [
+      "선사",
+      "운송사",
+      "지정 선사",
+      "지정선사",
+      "선사 지정",
+      "carrier",
+      "shipping line",
+      "liner",
+      "preferred carrier"
     ]
   },
   "multiItemHeader": "^\\s*[\\[【(〔]\\s*[^\\]】)〕]{1,20}\\s*[\\]】)〕]\\s*$",

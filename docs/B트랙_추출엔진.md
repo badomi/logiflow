@@ -48,11 +48,15 @@ cd server
 ```
 보고서는 `server/eval/reports/`. **오추출 목록**이 W3–4 "오추출 사례 피드백" 자료.
 
-| 측정 (2026-09-29, 룰만) | 결과 |
+| 측정 (2026-09-30, 룰만, 평가 세트 24건) | 결과 |
 |---|---|
-| 정밀도 | 99.5% (206/207) |
-| 채움률 | 92.0% (206/224) |
-| 처리 시간 | 최대 0.05초 |
+| 정밀도 | 100% (338/338) |
+| 채움률 | 92.3% (338/366) |
+| 처리 시간 | 최대 0.1초 |
+
+**모델 비교**: `server\run_benchmark.bat` 더블클릭 (또는 `python -m eval.compare --models qwen3.5:9b qwen3:14b`)
+→ 모델별 정밀도·채움률·시간을 한 표로 비교하고 기준(정밀도 ≥90%, ≤45초, LLM 오류 ≤10%) 통과 모델 중 추천.
+GPU PC 측정 절차는 `docs/LLM_측정_안내.md`.
 
 ⚠ **이 숫자는 낙관적이다.** 평가 메일(`eval/dataset.py`)을 룰과 같은 사람이 만들었다.
 실제 정밀도는 룰을 안 본 사람이 쓴 메일을 `eval/cases/`에 넣고 재야 한다 (방법: `eval/cases/README.md`).
@@ -113,6 +117,34 @@ cd server
 - 연도 없는 준비일(`10월 20일`, `Oct 20`)은 다가오는 날짜로 (확신도 0.8, 막 지난 날은 올해 → 검증에서 '지난 날짜'로 질문).
   `10/20` 같은 숫자 표기는 월/일 순서가 모호해 받지 않는다
 
+## 발주 측 요율표 (docs/양식/샘플_요율표.xlsx, 2026-09-30)
+`OceanFreight`·`Surcharges` 시트를 **그대로 올린다** (`python -m app.rates import 샘플_요율표.xlsx` / `POST /api/rates/import`, 시트 이름으로 형식 자동 판별).
+`rates` 테이블에 없던 10개 칸을 모두 담았다 (기존 DB에는 서버 시작 시 빈 칸으로 자동 추가 — `db.add_missing_columns`):
+
+| 칸 | 담은 곳 | 쓰임 |
+|---|---|---|
+| rate_id | `rates.source_ref` ('OceanFreight#1') | 금액별 근거 추적 (견적 결과 `lines[].source`, FR-509) |
+| carrier | `rates.carrier` | **선사 지정 시 그 선사, 미지정 시 최저가** (발주 측 규칙). 'ANY'는 선사 무관 |
+| direction | `rates.direction` | FOB는 도착지(DEST) 비용·해상운임 제외 |
+| rate_pct · min_amount | `rates.rate_pct` · `min_amount` (basis `PERCENT`) | 보험: 화물가액 × 0.2%, 최저 USD 30 (인보이스 통화가 다르면 실비) |
+| etd · eta · transit_days | `rates.etd`·`eta`·`transit_days` | 견적서 비고 'ETD / ETA (선사)', transitTime (FR-507) |
+| free_time_dem · free_time_det | `rates.free_time_dem`·`free_time_det` | freeTimeDem/Det — 고른 운임 행(선사별) 우선, 없으면 구간 룰 |
+
+계산 규칙도 맞췄다: 요율은 **선적일(화물 준비일) 기준**으로 고른다 (GRI 인상 후반기 행), 'ALL'·'ANY'·'-'는 '모두'.
+**검증: 발주 측 '조회예시' 시트(CNSHA→KRPUS 20GP×1, CIF, HMM, 10/05, USD 15,000 → TOTAL USD 890, ETD 10/06·ETA 10/08, Free 7일)를
+메일 한 통으로 그대로 재현** (`test_client_lookup_example_is_reproduced`).
+- 선사는 6장에 없는 입력이라 추출 보조값(`carrier`)으로 읽는다 ("선사: HMM"). 고객이 선사를 안 적으면 최저가.
+- 확인 필요(발주 측): CIF 예시에 도착지 THC가 포함돼 있어 그대로 따름 / FOB는 도착지 비용을 빼는 것으로 가정
+
+## 첨부 표 읽기 (FR-204, 2026-09-30)
+패킹리스트·인보이스는 대부분 표다. 표를 규칙이 읽는 '이름<TAB>값' 줄로 바꾼다 (`attachments.table_lines`).
+- PDF는 화면 배치대로 읽는다(pypdf layout) — 기본 방식은 표를 '값 칸 전부 → 이름 칸 전부'로 흩어 놓아 짝이 깨지고,
+  '품목' 다음 줄의 '수량'을 품목으로 읽는 오추출까지 났다 (한글 패킹리스트 PDF로 발견)
+- 세로 표 `품목 (Commodity) | 전자부품` → 한 줄 · 가로 표 `Description | Q'ty | CBM | G.W` → **TOTAL 줄**(없으면 값 줄이 하나일 때)과 짝지음.
+  품목 줄이 여럿이고 합계가 없으면 짝짓지 않는다 (어느 줄 값인지 모름)
+- 라벨만 있는 줄 다음 줄이 또 라벨이면 값으로 쓰지 않는다
+- 스캔(이미지) PDF는 글자가 없어 읽지 못한다 (OCR 미포함, FR-204 선택 사항)
+
 ## 실전 운영 기능 (2026-09-30)
 - **컨테이너 대수**: "40HQ 2대"·"2 x 40HQ"·"한 대" 인식 → CNTR당 비용 × 대수. 대수가 없으면 부피(내부 용적 × 0.88)·중량으로 필요한 대수를 산정하고
   견적서 비고에 근거를 적는다. 6장에 대수 필드가 없어 `quote_inputs`가 아니라 추출 결과 보조값(`containerCount`)으로 둔다.
@@ -140,5 +172,5 @@ cd server
 
 ## 아직 안 된 것
 - 실제 LLM으로 측정 안 함(개발 환경에서 Ollama 실행 불가) → 팀 PC에서 `--mode hybrid` 측정 필요
-- 블라인드 평가 메일 0건, MUST-SHIP ① 시연용 샘플 20건 중 16건
+- 블라인드 평가 메일 0건 (평가 세트 24건은 모두 룰 작성자가 만든 것 — MUST-SHIP ① 시연 샘플 수는 충족)
 - 스캔 PDF OCR(FR-204 선택 사항) 없음

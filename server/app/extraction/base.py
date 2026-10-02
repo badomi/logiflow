@@ -12,7 +12,7 @@ FIELDS = (
     "cargoReadyDate", "incoterms", "containerType", "grossWeightKg", "invoiceValue", "ccy", "paymentTerm",
     "customerName", "contactName", "contactEmail",
 )
-EXTRA_FIELDS = ("pickupLocation", "containerCount")  # 6장 밖 보조값: 판단·견적 계산에만 쓰고 quote_inputs에 저장하지 않는다
+EXTRA_FIELDS = ("pickupLocation", "containerCount", "carrier")  # 6장 밖 보조값: 판단·견적 계산에만 쓰고 quote_inputs에 저장하지 않는다
 
 
 @dataclass
@@ -67,5 +67,5 @@ GROUP_FIELDS = {
     "box": ("boxL",), "volume": ("totalCbm",), "totalCbm": ("totalCbm",), "grossWeightKg": ("grossWeightKg",),
     "pol": ("pol",), "pod": ("pod",), "cargoReadyDate": ("cargoReadyDate",), "incoterms": ("incoterms",),
     "containerType": ("containerType",), "invoiceValue": ("invoiceValue",), "ccy": ("ccy",),
-    "paymentTerm": ("paymentTerm",), "cargoDetail": (), "pickupLocation": (),
+    "paymentTerm": ("paymentTerm",), "cargoDetail": (), "pickupLocation": (), "carrier": (),
 }
