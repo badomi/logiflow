@@ -208,7 +208,8 @@ class Rate(Base):
     """요율/부대비용 마스터 1행 = 견적서의 비용 1줄 (OCEAN FREIGHT, THC, DOCUMENT FEE …).
 
     pol·pod·containerType·incoterms가 비어 있으면 '모든 값에 적용'으로 본다.
-    basis: PER_RT(LCL R/T) / PER_CNTR / PER_BL / PER_TRIP / AT_COST(실비, 금액 없이 산정식만 표기)
+    basis: PER_RT(LCL R/T) / PER_CNTR / PER_BL / PER_SHIPMENT / PER_TRIP / PERCENT(화물가액 × rate_pct, 최저 min_amount)
+           / AT_COST(실비, 금액 없이 산정식만 표기)
     """
 
     __tablename__ = "rates"
@@ -228,6 +229,18 @@ class Rate(Base):
     valid_from: Mapped[datetime | None] = mapped_column(Date)
     valid_until: Mapped[datetime | None] = mapped_column(Date)
     source: Mapped[str | None] = mapped_column(String(200))  # 요율 출처 (어느 요율표인지)
+
+    # --- 발주 측 요율표(샘플_요율표.xlsx) 칸 ---
+    source_ref: Mapped[str | None] = mapped_column(String(100))  # 원본 행 (rate_id → 'OceanFreight#1') — 근거 추적 FR-509
+    carrier: Mapped[str | None] = mapped_column(String(40))  # 선사. 비어 있거나 ANY면 선사 무관. 미지정 시 최저가 선택
+    direction: Mapped[str | None] = mapped_column(String(10))  # ORIGIN / DEST (FOB는 DEST 비용 제외)
+    rate_pct: Mapped[float | None] = mapped_column(Float)  # basis=PERCENT: 화물가액 × 비율 (예: 보험 0.002)
+    min_amount: Mapped[float | None] = mapped_column(Float)  # 최저 금액 (예: USD 30)
+    etd: Mapped[str | None] = mapped_column(String(10))  # 이 운임의 출항일 (ISO)
+    eta: Mapped[str | None] = mapped_column(String(10))  # 도착일
+    transit_days: Mapped[int | None] = mapped_column(Integer)
+    free_time_dem: Mapped[int | None] = mapped_column(Integer)
+    free_time_det: Mapped[int | None] = mapped_column(Integer)
 
 
 class LaneRule(Base):
@@ -257,6 +270,9 @@ class Quote(Base):
     version_no: Mapped[int] = mapped_column(Integer)
     valid_until: Mapped[str | None] = mapped_column(String(10))
     xlsx_path: Mapped[str | None] = mapped_column(String(500))
+    carrier: Mapped[str | None] = mapped_column(String(40))  # 고른 해상운임의 선사
+    etd: Mapped[str | None] = mapped_column(String(10))
+    eta: Mapped[str | None] = mapped_column(String(10))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     case: Mapped[Case] = relationship(back_populates="quotes")
@@ -279,6 +295,7 @@ class QuoteItem(Base):
     amount: Mapped[float | None] = mapped_column(Float)
     currency: Mapped[str] = mapped_column(String(3))
     remark: Mapped[str | None] = mapped_column(String(300))
+    source_ref: Mapped[str | None] = mapped_column(String(100))  # 어느 요율표 행에서 왔는지 (FR-509)
 
     quote: Mapped[Quote] = relationship(back_populates="items")
 

@@ -29,6 +29,7 @@ LLM_FIELDS = {
     "invoiceValue": "인보이스 금액과 통화 (예: 8500 USD). 금액과 통화가 다른 줄이면 합쳐서",
     "currency": "인보이스 통화만 적힌 경우 (예: USD)",
     "paymentTerm": "결제 조건 (예: T/T 30% Advance)",
+    "carrier": "고객이 지정한 선사 (예: HMM). 지정이 없으면 생략",
     "customerName": "견적을 요청한 회사명",
     "contactName": "견적을 요청한 담당자 이름",
     "contactEmail": "견적을 요청한 담당자 이메일",
@@ -52,7 +53,7 @@ KEY_FIELDS = {
     "portOfLoading": ("pol",), "portOfDischarge": ("pod",), "cargoReadyDate": ("cargoReadyDate",),
     "incoterms": ("incoterms",), "container": ("containerType",), "invoiceValue": ("invoiceValue",),
     "currency": ("ccy",), "paymentTerm": ("paymentTerm",), "customerName": ("customerName",),
-    "contactName": ("contactName",), "contactEmail": ("contactEmail",),
+    "contactName": ("contactName",), "contactEmail": ("contactEmail",), "carrier": ("carrier",),
 }
 CONTACT_KEYS = ("customerName", "contactName", "contactEmail")
 
@@ -62,6 +63,7 @@ KEY_GROUP = {
     "totalVolume": "totalCbm", "grossWeight": "grossWeightKg", "portOfLoading": "pol", "portOfDischarge": "pod",
     "cargoReadyDate": "cargoReadyDate", "incoterms": "incoterms",
     "container": "containerType", "invoiceValue": "invoiceValue", "currency": "ccy", "paymentTerm": "paymentTerm",
+    "carrier": "carrier",
 }
 # 보완 질문 항목 → 프롬프트에 보여 줄 이름 (번호 답변 해석용)
 FIELD_NAMES = {

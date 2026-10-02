@@ -5,6 +5,7 @@
 """
 
 import base64
+from pathlib import Path
 import uuid
 from datetime import date
 
@@ -701,3 +702,70 @@ def test_attachment_values_flow_through_outlook_eml(client, connect):
     assert fields["grossWeightKg"]["value"] == 240.0 and "첨부 packing_list.pdf" in fields["grossWeightKg"]["origin"]
     assert fields["invoiceValue"]["value"] == 6000 and "첨부 invoice.xlsx" in fields["invoiceValue"]["origin"]
     assert case["status"] == "계산완료"  # 본문 + 첨부 두 개로 견적까지
+
+
+# ------------------------------------------------------------------ 발주 측 샘플 요율표 (docs/양식/샘플_요율표.xlsx)
+
+CLIENT_RATES = Path(__file__).resolve().parents[2] / "docs" / "양식" / "샘플_요율표.xlsx"
+CLIENT_CASE = ("품목: 자동차 부품\n수량: 200박스\n총 부피: 25CBM\n총중량: 8,000kg\n선적항: 상하이\n도착항: 부산\n"
+               "화물 준비일: 2026-10-05\n조건: CIF\n컨테이너: 20GP 1대\n인보이스 금액: USD 15,000\n결제조건: T/T\n{carrier}감사합니다.")
+
+
+@pytest.fixture
+def client_rates(client, connect):
+    res = client.post("/api/rates/import", files={"file": ("샘플_요율표.xlsx", CLIENT_RATES.read_bytes(), "application/octet-stream")})
+    assert res.status_code == 200 and res.json()["rates"] == 35, res.json()
+
+
+def test_client_lookup_example_is_reproduced(client, client_rates):
+    """발주 측 '조회예시' 시트: CNSHA→KRPUS 20GP×1, CIF, HMM, 선적일 10/05, 화물가액 15,000 → TOTAL USD 890."""
+    case = create(client, text_mail(CLIENT_CASE.format(carrier="선사: HMM\n")))
+    quote = case["extraction"]["validation"]["quote"]
+    assert case["status"] == "계산완료", case["extraction"]["validation"]
+    assert quote["totals"] == {"USD": 890.0} and quote["carrier"] == "HMM"
+    assert (quote["etd"], quote["eta"]) == ("2026-10-06", "2026-10-08")  # 조회예시 스케줄
+    lines = {line["charge"]: (line["amount"], line["source"]) for line in quote["lines"]}
+    assert lines["OCEAN FREIGHT"] == (450.0, "OceanFreight#1")  # 근거 행까지 예시와 같다
+    assert lines["CARGO INSURANCE"][0] == 30.0  # 15,000 × 0.2% = 30 (최저 30)
+    fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
+    detail = client.get(f"/api/cases/{case['caseId']}").json()
+    ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
+    remarks = [ws[f"B{r}"].value or "" for r in range(39, 48)]
+    assert any("ETD / ETA : 2026-10-06 / 2026-10-08 (HMM)" in r for r in remarks)
+    assert any("FREE TIME : DET 7일 / DEM 7일" in r for r in remarks)
+    assert fields["pol"]["value"] == "CNSHA" and detail["status"] == "계산완료"
+
+
+def test_client_rates_lowest_carrier_when_not_specified(client, client_rates):
+    case = create(client, text_mail(CLIENT_CASE.format(carrier="")))
+    quote = case["extraction"]["validation"]["quote"]
+    assert quote["carrier"] == "SITC" and quote["totals"] == {"USD": 870.0}  # 선사 미지정 → 최저가 SITC 430
+    assert (quote["etd"], quote["eta"]) == ("2026-10-07", "2026-10-09")
+
+
+def test_client_rates_follow_cargo_ready_date(client, client_rates):
+    """GRI 인상: 선적일이 10/16 이후면 후반기 행(HMM 520)을 쓴다 — '오늘'이 아니라 선적일 기준."""
+    case = create(client, text_mail(CLIENT_CASE.format(carrier="선사: HMM\n").replace("2026-10-05", "2026-10-20")))
+    quote = case["extraction"]["validation"]["quote"]
+    assert quote["rateDate"] == "2026-10-20" and quote["totals"] == {"USD": 960.0}  # 890 - 450 + 520
+
+
+def test_client_rates_fob_excludes_freight_and_destination(client, client_rates):
+    case = create(client, text_mail(CLIENT_CASE.format(carrier="").replace("조건: CIF", "조건: FOB")))
+    lines = {line["charge"] for line in case["extraction"]["validation"]["quote"]["lines"]}
+    assert "OCEAN FREIGHT" not in lines and "DESTINATION THC" not in lines and "CARGO INSURANCE" not in lines
+    assert case["extraction"]["validation"]["quote"]["totals"] == {"USD": 280.0}  # OTHC 120 + DOC 30 + BL 30 + 취급 50 + BAF 50
+
+
+def test_client_rates_bad_file_changes_nothing(client, client_rates):
+    import io
+
+    from openpyxl import load_workbook as load
+
+    wb = load(CLIENT_RATES)
+    wb["OceanFreight"]["D5"] = "SIDNEY"  # 첫 운임 행의 pod를 틀리게
+    buf = io.BytesIO()
+    wb.save(buf)
+    res = client.post("/api/rates/import", files={"file": ("bad.xlsx", buf.getvalue(), "application/octet-stream")})
+    assert res.status_code == 400 and any("OceanFreight 5행 pod" in e for e in res.json()["detail"]["errors"])
+    assert client.get("/api/rates/summary").json()  # 기존 요율은 그대로

@@ -7,7 +7,10 @@
 API: GET /api/rates/template · GET /api/rates/export · POST /api/rates/import · GET /api/rates/summary
 
 올리기 규칙: 엑셀의 '출처'가 같은 요율은 통째로 바꾼다 (예: '2026-10 D선사 월간운임'을 다시 올리면 그 출처만 교체).
-발주 측 요율표 형식을 받으면 그 형식을 바로 읽는 변환기를 이 모듈에 추가한다.
+
+두 가지 형식을 받는다 (같은 명령·API, 시트 이름으로 자동 판별):
+  1) 우리 양식 — '요율'·'구간룰' 시트 (python -m app.rates template)
+  2) 발주 측 요율표 — 'OceanFreight'·'Surcharges' 시트 (샘플_요율표.xlsx 형식). 출처는 '발주측 요율표'로 통째 교체
 """
 
 import argparse
@@ -37,7 +40,14 @@ KNOWN_CODES = {
     "OCEAN_FREIGHT": "해상운임 (CIF·DDP·EXW 견적에 필수)", "THC": "출발지 터미널 비용 (없으면 부대비용 요율 없음으로 보류)",
     "CFS": "CFS 창고료", "WFG": "부두사용료(Wharfage)", "SHUTTLE": "셔틀 비용", "DOC_FEE": "서류 발급비",
     "SEAL": "씰 비용", "CUSTOMS": "수출 통관비", "INSURANCE": "적하보험료", "PSF": "PSF", "PFS": "PFS", "SHORING": "쇼링 비용",
+    # 발주 측 요율표 코드
+    "OTHC": "출발지 터미널 비용", "DTHC": "도착지 터미널 비용", "DOC": "서류 발급비", "BL": "B/L 발행비",
+    "HANDLING": "취급 수수료", "INS": "적하보험 (화물가액 %)", "BAF": "유류할증료",
 }
+CLIENT_SOURCE = "발주측 요율표"
+CLIENT_BASIS = {"PER_CONTAINER": "PER_CNTR", "PER_CNTR": "PER_CNTR", "PER_BL": "PER_BL", "PER_SHIPMENT": "PER_SHIPMENT",
+                "PERCENT_OF_VALUE": "PERCENT", "PERCENT": "PERCENT", "PER_RT": "PER_RT", "PER_TRIP": "PER_TRIP",
+                "AT_COST": "AT_COST"}
 
 HEADER_FILL = PatternFill("solid", fgColor="1F3864")
 
@@ -202,12 +212,112 @@ def _rows(ws, columns: list[str], errors: list[str]):
         yield n, {name: (row[i] if i < len(row) else None) for name, i in index.items()}
 
 
+def _client_rows(ws, required: list[str], errors: list[str]):
+    """발주 측 시트: 제목·설명 줄 아래 어딘가에 칸 이름 줄이 있다 (첫 5줄 안에서 찾는다)."""
+    header_row, header = None, []
+    for n, row in enumerate(ws.iter_rows(min_row=1, max_row=5, values_only=True), start=1):
+        names = [_text(c).lower() for c in row]
+        if required[0] in names:
+            header_row, header = n, names
+            break
+    if header_row is None:
+        errors.append(f"'{ws.title}' 시트에서 칸 이름 줄({required[0]} …)을 찾지 못했습니다")
+        return
+    missing = [c for c in required if c not in header]
+    if missing:
+        errors.append(f"'{ws.title}' 시트에 칸이 없습니다: {', '.join(missing)}")
+        return
+    for n, row in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True), start=header_row + 1):
+        if not row or all(v in (None, "") for v in row):
+            continue
+        yield n, {name: (row[i] if i < len(row) else None) for i, name in enumerate(header) if name}
+
+
+def _all(value) -> str | None:
+    text = _text(value)
+    return None if text.upper() in ("", "ALL", "ANY", "-") else text
+
+
+def parse_client_workbook(session: Session, wb) -> tuple[list[Rate], list[str]]:
+    """발주 측 요율표(OceanFreight·Surcharges 시트) → 요율 행. 'ALL'·'ANY'·'-'는 '모두'(빈칸)."""
+    errors: list[str] = []
+    known = set(session.scalars(select(ContainerType.code)))
+    sheets = {name.lower(): wb[name] for name in wb.sheetnames}
+    rates: list[Rate] = []
+
+    def common(row, where):
+        start, end = _date(row.get("valid_from"), f"{where} valid_from", errors), _date(row.get("valid_to"), f"{where} valid_to", errors)
+        if start and end and start > end:
+            errors.append(f"{where}: valid_from이 valid_to보다 늦습니다")
+        currency = (_text(row.get("currency")) or "USD").upper()
+        if len(currency) != 3 or not currency.isalpha():
+            errors.append(f"{where}: currency는 USD 같은 3자리여야 합니다 ({currency})")
+        cntr = _all(row.get("container_type"))
+        return start, end, currency, (_container(cntr, f"{where} container_type", errors, known) if cntr else None)
+
+    if "oceanfreight" in sheets:
+        cols = ["rate_id", "pol", "pod", "container_type", "carrier", "currency", "amount", "valid_from", "valid_to"]
+        for n, row in _client_rows(sheets["oceanfreight"], cols, errors):
+            where = f"OceanFreight {n}행"
+            start, end, currency, cntr = common(row, where)
+            price = _number(row.get("amount"), f"{where} amount", errors, required=True)
+            days = [_number(row.get(k), f"{where} {k}", errors, required=False)
+                    for k in ("transit_days", "free_time_dem", "free_time_det")]
+            etd, eta = _date(row.get("etd"), f"{where} etd", errors), _date(row.get("eta"), f"{where} eta", errors)
+            rates.append(Rate(
+                charge_code="OCEAN_FREIGHT", charge_label="OCEAN FREIGHT", basis="PER_CNTR", unit_price=price,
+                pol=_port(row.get("pol"), f"{where} pol", errors), pod=_port(row.get("pod"), f"{where} pod", errors),
+                container_type=cntr, carrier=_all(row.get("carrier")), currency=currency, valid_from=start,
+                valid_until=end, etd=etd.isoformat() if etd else None, eta=eta.isoformat() if eta else None,
+                transit_days=int(days[0]) if days[0] is not None else None,
+                free_time_dem=int(days[1]) if days[1] is not None else None,
+                free_time_det=int(days[2]) if days[2] is not None else None,
+                remark=_text(row.get("remark")) or "PER CNTR", sort_no=10, source=CLIENT_SOURCE,
+                source_ref=f"OceanFreight#{_text(row.get('rate_id')) or n}",
+            ))
+    if "surcharges" in sheets:
+        cols = ["charge_code", "charge_name", "basis", "currency", "valid_from", "valid_to"]
+        for order, (n, row) in enumerate(_client_rows(sheets["surcharges"], cols, errors), start=1):
+            where = f"Surcharges {n}행"
+            start, end, currency, cntr = common(row, where)
+            code = _text(row.get("charge_code")).upper().replace(" ", "_")
+            if not code:
+                errors.append(f"{where}: charge_code가 비어 있습니다")
+            basis = CLIENT_BASIS.get(_text(row.get("basis")).upper())
+            if basis is None:
+                errors.append(f"{where}: basis를 알 수 없습니다 ({row.get('basis')}) — {', '.join(CLIENT_BASIS)}")
+            pct = _number(row.get("rate_pct"), f"{where} rate_pct", errors, required=basis == "PERCENT")
+            price = _number(row.get("amount"), f"{where} amount", errors, required=basis not in ("PERCENT", "AT_COST"))
+            terms = (_all(row.get("incoterms_condition")) or "").upper() or None
+            if terms and terms not in P.INCOTERMS:
+                errors.append(f"{where}: incoterms_condition은 FOB·CIF·DDP·EXW 중 하나여야 합니다 ({terms})")
+            direction = (_all(row.get("direction")) or "").upper() or None
+            if direction and direction not in ("ORIGIN", "DEST"):
+                errors.append(f"{where}: direction은 ORIGIN·DEST·- 중 하나여야 합니다 ({direction})")
+            rates.append(Rate(
+                charge_code=code, charge_label=_text(row.get("charge_name")).upper() or code, basis=basis or "PER_BL",
+                unit_price=price, rate_pct=pct, min_amount=_number(row.get("min_amount"), f"{where} min_amount", errors,
+                                                                    required=False),
+                pol=_port(_all(row.get("applies_pol")), f"{where} applies_pol", errors),
+                pod=_port(_all(row.get("applies_pod")), f"{where} applies_pod", errors),
+                container_type=cntr, incoterms=terms, direction=direction, currency=currency, valid_from=start,
+                valid_until=end, remark=_text(row.get("remark")) or None, sort_no=20 + order, source=CLIENT_SOURCE,
+                source_ref=f"Surcharges#{n}행 {code}",
+            ))
+    if not rates and not errors:
+        errors.append("OceanFreight·Surcharges 시트에 요율이 한 줄도 없습니다")
+    return rates, errors
+
+
 def parse_workbook(session: Session, data: bytes) -> tuple[list[Rate], list[LaneRule] | None, list[str]]:
     errors: list[str] = []
     try:
         wb = load_workbook(io.BytesIO(data), data_only=True)
     except Exception as error:  # 엑셀이 아닌 파일
         raise RateImportError([f"엑셀(.xlsx) 파일을 열 수 없습니다: {error}"]) from error
+    if {"oceanfreight", "surcharges"} & {n.lower() for n in wb.sheetnames}:  # 발주 측 요율표 형식
+        rates, errors = parse_client_workbook(session, wb)
+        return rates, None, errors
     if RATE_SHEET not in wb.sheetnames:
         raise RateImportError([f"'{RATE_SHEET}' 시트가 없습니다 (양식을 내려받아 쓰세요)"])
     known = set(session.scalars(select(ContainerType.code)))

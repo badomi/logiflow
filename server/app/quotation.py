@@ -13,6 +13,7 @@ PDF는 LibreOffice로 같은 XLSX를 변환하고, 없거나 실패하면 내장
 import io
 import logging
 import math
+from datetime import date
 import os
 import shutil
 import subprocess
@@ -48,7 +49,38 @@ def find_rates(session: Session, qi, on_date) -> list[Rate]:
     return rows
 
 
-def rates_with_reason(session: Session, qi, on_date) -> tuple[list[Rate], str | None]:
+def rate_date(qi, today):
+    """요율을 고르는 기준일 = 선적일(화물 준비일). 없거나 지난 날이면 오늘 (발주 측 요율표 조회 규칙)."""
+    try:
+        ready = date.fromisoformat(qi.cargoReadyDate) if qi.cargoReadyDate else None
+    except ValueError:
+        ready = None
+    return ready if ready and ready >= today else today
+
+
+def _carrier_key(value: str | None) -> str:
+    return (value or "").strip().upper()
+
+
+def choose_carrier(rows: list[Rate], wanted: str | None) -> tuple[list[Rate], str | None]:
+    """해상운임 행이 선사별로 여럿이면 하나만 남긴다: 지정 선사 → 없으면 최저가 (발주 측 규칙).
+
+    선사 없는(ANY) 행은 선사 무관 운임으로 함께 경쟁한다. 부대비용은 선사와 무관하게 그대로 둔다.
+    """
+    freight = [r for r in rows if r.charge_code == "OCEAN_FREIGHT"]
+    if len(freight) <= 1:
+        return rows, (freight[0].carrier if freight and _carrier_key(freight[0].carrier) not in ("", "ANY") else None)
+    pool = freight
+    if wanted:
+        named = [r for r in freight if _carrier_key(r.carrier) == _carrier_key(wanted)]
+        pool = named or freight  # 지정 선사의 운임이 없으면 최저가로 (견적서 비고에 표시)
+    best = min(pool, key=lambda r: (r.unit_price if r.unit_price is not None else float("inf"), r.id))
+    keep = [r for r in rows if r.charge_code != "OCEAN_FREIGHT" or r is best]
+    carrier = best.carrier if _carrier_key(best.carrier) not in ("", "ANY") else None
+    return keep, carrier
+
+
+def rates_with_reason(session: Session, qi, on_date, carrier: str | None = None) -> tuple[list[Rate], str | None]:
     """견적에 쓸 요율 행과, 못 쓰면 그 이유 (FR-501: 요율이 모자라면 견적을 만들지 않는다)."""
     lane = f"{qi.pol}→{qi.pod} {qi.containerType}"
     rows = session.scalars(
@@ -63,14 +95,18 @@ def rates_with_reason(session: Session, qi, on_date) -> tuple[list[Rate], str | 
         )
         .order_by(Rate.sort_no, Rate.id)
     ).all()
+    rows = list(rows)
+    if qi.incoterms == "FOB":  # FOB: 해상운임·도착지 비용은 매수인 부담 → 출발지 비용만
+        rows = [r for r in rows if r.charge_code != "OCEAN_FREIGHT" and (r.direction or "").upper() != "DEST"]
+    rows, _ = choose_carrier(rows, carrier)
     # 구간(pol 또는 pod)이 지정된 요율이 하나도 없으면 '요율 없는 구간'으로 본다 — 공통 부대비용만으로 견적 금지
     if not any(r.pol or r.pod for r in rows):
         return [], f"요율 미등록 구간 {lane} (FR-501)"
     # CIF 등인데 이 도착항의 해상운임 요율이 없으면 견적 불가 (출발지 부대비용만으로 만들지 않는다)
     if qi.incoterms in FREIGHT_REQUIRED and not any(r.charge_code == "OCEAN_FREIGHT" for r in rows):
         return [], f"해상운임 요율 없음 {lane} {qi.incoterms} (FR-501)"
-    # 출발지 THC가 없으면 국내 부대비용 요율이 없는 것 — 해상운임만 있는 불완전한 견적을 만들지 않는다
-    if not any(r.charge_code == "THC" for r in rows):
+    # 터미널 비용(THC·OTHC·DTHC)이 없으면 부대비용 요율이 없는 것 — 해상운임만 있는 불완전한 견적을 만들지 않는다
+    if not any("THC" in (r.charge_code or "") for r in rows):
         return [], f"국내 부대비용(THC 등) 요율 없음 {qi.pol} {qi.containerType} (FR-501)"
     return list(rows), None
 
@@ -129,11 +165,11 @@ def container_count(session: Session, qi, stated: int | None) -> tuple[int | Non
 def quantity(basis: str, qi, count: int | None = None) -> float | None:
     if basis == "PER_RT":
         return revenue_ton(qi)
-    if basis == "AT_COST":
+    if basis in ("AT_COST", "PERCENT"):
         return None
     if basis == "PER_CNTR":
         return float(count or 1)
-    return 1.0  # PER_BL·PER_TRIP
+    return 1.0  # PER_BL·PER_SHIPMENT·PER_TRIP
 
 
 def money(value: float, currency: str) -> float:
@@ -147,30 +183,48 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
     from .validation import today_kst  # 순환 import 방지
 
     today = today_kst()
-    rates, _reason = rates_with_reason(session, qi, today)
+    wanted = ((extraction or {}).get("fields") or {}).get("carrier") or {}
+    wanted_carrier = wanted.get("value") if wanted.get("status") == "filled" else None
+    on_date = rate_date(qi, today)
+    rates, _reason = rates_with_reason(session, qi, on_date, wanted_carrier)
     if not rates:
         return None
+    _, carrier = choose_carrier(rates, wanted_carrier)
+    freight = next((r for r in rates if r.charge_code == "OCEAN_FREIGHT"), None)
 
     rule = lane_rule(session, qi)
     qi.quoteCurrency = rule.quote_currency if rule else "USD"
-    qi.transitTime = rule.transit_days if rule else None
-    qi.freeTimeDet = rule.free_time_det if rule else None
-    qi.freeTimeDem = rule.free_time_dem if rule else None
+    # 운송일수·프리타임: 고른 해상운임 행(선사별)이 우선, 없으면 구간 룰 (FR-507)
+    qi.transitTime = (freight.transit_days if freight and freight.transit_days is not None
+                      else (rule.transit_days if rule else None))
+    qi.freeTimeDet = (freight.free_time_det if freight and freight.free_time_det is not None
+                      else (rule.free_time_det if rule else None))
+    qi.freeTimeDem = (freight.free_time_dem if freight and freight.free_time_dem is not None
+                      else (rule.free_time_dem if rule else None))
     qi.validityDays = rule.validity_days if rule else 14
     qi.exchangeRateAsOf = today.isoformat()  # 실제 환율은 출항일 기준 적용 — 견적서 비고에 고지 (FR-508)
+    etd = freight.etd if freight else None
+    eta = freight.eta if freight else None
+    if etd and not eta and qi.transitTime:
+        eta = (date.fromisoformat(etd) + timedelta(days=qi.transitTime)).isoformat()  # ETA = ETD + 운송일수
 
     version = (session.scalar(select(func.max(Quote.version_no)).where(Quote.case_pk == case.id)) or 0) + 1
-    quote = Quote(case=case, version_no=version, valid_until=(today + timedelta(days=qi.validityDays)).isoformat())
+    quote = Quote(case=case, version_no=version, valid_until=(today + timedelta(days=qi.validityDays)).isoformat(),
+                  carrier=carrier, etd=etd, eta=eta)
     totals: dict[str, float] = {}
     for rate in rates:
         qty = quantity(rate.basis, qi, count)
-        amount = None
-        if qty is not None and rate.unit_price is not None:
+        amount, unit_price, remark = None, rate.unit_price, rate.remark
+        if rate.basis == "PERCENT":
+            amount, remark = percent_amount(rate, qi)
+            unit_price = None
+        elif qty is not None and rate.unit_price is not None:
             amount = money(rate.unit_price * qty, rate.currency)
+        if amount is not None:
             totals[rate.currency] = money(totals.get(rate.currency, 0) + amount, rate.currency)
         quote.items.append(QuoteItem(
             charge_code=rate.charge_code, charge_label=rate.charge_label, basis=rate.basis,
-            rate=rate.unit_price, qty=qty, amount=amount, currency=rate.currency, remark=rate.remark,
+            rate=unit_price, qty=qty, amount=amount, currency=rate.currency, remark=remark, source_ref=rate.source_ref,
         ))
     for currency in sorted(totals, key=lambda c: (c != "USD", c)):
         quote.totals.append(QuoteTotal(currency=currency, total=totals[currency]))
@@ -196,7 +250,23 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
         "containerCount": count,
         "containerCountNote": count_note,
         "rateSources": sorted({r.source for r in rates if r.source}),
+        "rateDate": on_date.isoformat(),
+        "carrier": carrier,
+        "carrierRequested": wanted_carrier,
+        "etd": etd, "eta": eta,
+        "lines": [{"charge": i.charge_label, "amount": i.amount, "currency": i.currency, "source": i.source_ref}
+                  for i in quote.items],  # 금액별 근거 (어느 요율표 행) FR-509
     }
+
+
+def percent_amount(rate: Rate, qi) -> tuple[float | None, str | None]:
+    """화물가액 × 비율, 최저 금액 (예: 보험 15,000 × 0.2% = 30, 최저 30). 통화가 다르면 계산하지 않는다(환율 미반영)."""
+    pct = rate.rate_pct or 0
+    label = f"INV.V x {pct * 100:g}%" + (f" (MIN {rate.currency} {rate.min_amount:,.0f})" if rate.min_amount else "")
+    if qi.invoiceValue is None or (qi.ccy and qi.ccy != rate.currency):
+        return None, f"{label} — 인보이스 통화가 달라 실비 청구"
+    amount = max(qi.invoiceValue * pct, rate.min_amount or 0)
+    return money(amount, rate.currency), label
 
 
 # ------------------------------------------------------------------ XLSX 양식 채우기
@@ -293,7 +363,10 @@ def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: 
             ws[f"{col}{row}"] = None
     for row, item in zip(range(ITEM_FIRST_ROW, ITEM_LAST_ROW + 1), items):
         ws[f"B{row}"] = item.charge_label
-        if item.basis == "AT_COST" or item.rate is None:
+        if item.basis == "PERCENT" and item.amount is not None:  # 화물가액 % (산정식은 비고 칸)
+            ws[f"E{row}"] = item.amount
+            ws[f"E{row}"].number_format = MONEY_FORMAT.get(item.currency, "#,##0.00")
+        elif item.basis == "AT_COST" or item.rate is None:
             ws.merge_cells(f"C{row}:E{row}")  # FOB 예시처럼 단가~금액 칸을 합쳐 AT COST
             ws[f"C{row}"] = "AT COST"
             ws[f"C{row}"].alignment = Alignment(horizontal="center", vertical="center")
@@ -304,12 +377,17 @@ def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: 
             ws[f"E{row}"] = item.amount
             ws[f"E{row}"].number_format = MONEY_FORMAT.get(item.currency, "#,##0.00")
         ws[f"F{row}"] = item.remark or {"PER_RT": "PER R/T", "PER_CNTR": "PER CNTR", "PER_BL": "PER B/L",
-                                         "PER_TRIP": "PER TRIP"}.get(item.basis, "")
+                                         "PER_SHIPMENT": "PER SHIPMENT", "PER_TRIP": "PER TRIP"}.get(item.basis, "")
     for row in range(ITEM_FIRST_ROW + len(items), ITEM_LAST_ROW + 1):
         ws.row_dimensions[row].hidden = True  # 쓰지 않은 비용 줄은 숨긴다 (예시처럼 쓴 줄만 보이게)
     ws[f"C{TOTAL_ROW}"] = total_text(quote)
 
     remarks = ["* 실제 출항일 환율 적용", "* 화물 DETAIL의 변경에 따라 상기 견적이 달라 질 수 있습니다."]
+    if quote.etd or quote.eta:
+        carrier = f" ({quote.carrier})" if quote.carrier else ""
+        remarks.append(f"* ETD / ETA : {quote.etd or '-'} / {quote.eta or '-'}{carrier}")
+    elif quote.carrier:
+        remarks.append(f"* 선사 : {quote.carrier}")
     if qi.transitTime:
         remarks.append(f"* T/T : 약 {qi.transitTime}일")
     if qi.freeTimeDet or qi.freeTimeDem:

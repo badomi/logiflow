@@ -263,7 +263,7 @@ class RuleValidator:
             quote = quotation.build(session, case, extraction)
             if quote is None:
                 case.status = "보류"
-                _rows, reason = quotation.rates_with_reason(session, qi, today_kst())
+                _rows, reason = quotation.rates_with_reason(session, qi, quotation.rate_date(qi, today_kst()))
                 hold.append({"code": "NO_RATE", "severity": severity("NO_RATE"), "message": reason or f"요율 없음 {qi.pol}→{qi.pod} {qi.containerType} (FR-501)"})
             else:
                 case.status = "계산완료"

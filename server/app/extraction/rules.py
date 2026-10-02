@@ -181,6 +181,10 @@ def parse_value(field: str, value: str, label: str = "") -> tuple[list[tuple[str
         p = P.parse_currency(v)
         if p:
             out.append(("ccy", p.value, p.conf))
+    elif field == "carrier":  # 지정 선사 (6장 밖 보조값 — 요율 선택용). '아무 선사나'·'무관'이면 지정 아님
+        v = _strip_ending(v)
+        if 1 <= len(v) <= 30 and not _REQUEST_WORDS.search(v) and not re.search(r"무관|상관없|아무|any", v, re.I):
+            out.append(("carrier", v.strip().upper(), 1.0))
     elif field == "paymentTerm":
         v = _strip_ending(v)
         if _PAYMENT.search(v) and len(v) <= 80:

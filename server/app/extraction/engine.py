@@ -214,8 +214,8 @@ def llm_targets(rule_only: dict, notes: list[dict], multi_rule: bool, sources: l
             need = older and any(w in reply_text for w in words)  # 회신이 이 항목을 문장으로 고쳤을 수 있음
         if need:
             keys.append(key)
-    # 고객사명·담당자명은 필수가 아니고 없으면 헤더 발신자로 대신한다 → 이것만을 위해 LLM을 부르지 않는다
-    if all(k in llm_stage.CONTACT_KEYS for k in keys):
+    # 고객사명·담당자명·지정 선사는 필수가 아니다 → 이것만을 위해 LLM을 부르지 않는다 (다른 항목을 물을 때 같이)
+    if all(k in (*llm_stage.CONTACT_KEYS, "carrier") for k in keys):
         return []
     return keys
 
