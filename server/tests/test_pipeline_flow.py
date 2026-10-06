@@ -128,7 +128,10 @@ def test_quote_is_english_by_default(client, connect):
     assert ws["B12"].value == f"Subject : Ocean Freight Quotation  [{case_id}]"
     # 회사명·담당자명이 없는 메일이면 수신 줄에 회신 주소를 적는다 (빈 줄로 나가지 않게)
     assert ws["B9"].value == "To : buyer@abc-trading.example.com" and ws["B48"].value == "* Thank you."
-    assert f"* QUOTE NO. : {case_id} (Rev. 1)" in text and "* Exchange rate on the actual sailing date" in text
+    assert f"* QUOTE NO. : {case_id} (Rev. 1)" in text
+    # FR-508: 견적 통화·환율 기준일 명시 + 환율 변동 고지 (테스트의 '오늘'은 2026-09-29)
+    assert "* Quote currency: USD / Exchange rate as of 2026-09-29 (rate on the actual sailing date applies)." in text
+    assert "exchange rate fluctuation within validity" in text
     assert "* Destination charges are for consignee's account." in text  # CIF 수출 견적 고지
 
 
@@ -141,6 +144,7 @@ def test_quote_language_can_be_korean(client, connect, monkeypatch):
     assert ws["C19"].value.endswith("(1 R/T 기준)") and ws["F29"].value == "INV.V x 1/1,000 (MIN 기준)"
     assert ws["B48"].value == "* 감사합니다." and ws["B9"].value == "수 신 : buyer@abc-trading.example.com"
     assert "* 도착지 비용 수하인 부담" in [ws[f"B{r}"].value for r in range(39, 48)]
+    assert ws["B39"].value == "* 견적 통화 USD · 환율 기준일 2026-09-29 (실제 출항일 환율 적용)"
     assert any((ws[f"B{r}"].value or "").startswith("* VALIDITY : 2026년") for r in range(39, 48))
 
 
@@ -400,6 +404,17 @@ def test_quote_pdf_is_made_with_libreoffice(client, connect, monkeypatch):
     assert quote["pdf"] and pdf.read_bytes()[:4] == b"%PDF"
     draft = client.post(f"/api/cases/{case['caseId']}/drafts/quote", json={}).json()
     assert sorted(a["filename"] for a in draft["attachments"]) == sorted([pdf.name, f"{case['caseId']}_견적서.xlsx"])
+
+
+def test_quote_generation_time_is_recorded_within_10_seconds(client, connect, monkeypatch):
+    """NFR-02: 견적서 생성 10초 이내 — XLSX와 PDF(내장 엔진)까지 만든 시간을 재서 검증 결과에 남긴다."""
+    from app import quotation
+
+    monkeypatch.setattr(settings, "quote_pdf", True)
+    monkeypatch.setattr(quotation, "find_soffice", lambda: None)
+    quote = create(client, text_mail(FULL_LCL))["extraction"]["validation"]["quote"]
+    assert quote["pdf"] and isinstance(quote["elapsedMs"], int)
+    assert 0 <= quote["elapsedMs"] <= 10_000 and quote["withinLimit"] is True
 
 
 def test_quote_without_libreoffice_uses_builtin_pdf(client, connect, monkeypatch):
@@ -823,6 +838,28 @@ def test_nothing_to_quote_is_held(client, client_rates):
     exw = create(client, text_mail(FULL_LCL.replace("조건: CIF", "조건: EXW")))  # 인천 → 시드니 = 수출
     hold = exw["extraction"]["validation"]["hold"]
     assert exw["status"] == "보류" and "EXW 조건의 수출자" in hold[0]["message"]
+
+
+def test_two_rate_tables_do_not_double_charge(client, client_rates):
+    """요율표가 두 벌(테스트 요율 + 발주 측 요율표) 올라와 있어도 한 견적에 서류비·보험료가 두 번 들어가지 않는다.
+
+    인천→시드니 LCL은 테스트 요율에만 있다 → 발주 측 요율표의 공통(ALL) 서류비·B/L·취급료·보험은 붙지 않는다.
+    """
+    quote = create(client, text_mail(FULL_LCL))["extraction"]["validation"]["quote"]
+    lines = [line["charge"] for line in quote["lines"]]
+    assert quote["totals"] == {"USD": 500.0, "KRW": 140203.0}
+    assert not {"DOCUMENTATION FEE", "B/L FEE", "HANDLING CHARGE", "CARGO INSURANCE"} & set(lines)
+    assert lines.count("DOCUMENT FEE") == 1 and lines.count("INSURANCE FEE") == 1
+
+
+def test_quote_date_is_korean_time():
+    """견적서 DATE는 한국 시각 기준 — DB의 UTC 시각을 그대로 찍으면 오전 9시 전에는 하루 전 날짜가 된다."""
+    from datetime import datetime, timezone
+
+    from app import quotation as q
+
+    assert f"{q.kst(datetime(2026, 10, 6, 23, 30)):%Y. %m. %d}" == "2026. 10. 07"  # UTC 23:30 = 한국 08:30 다음 날
+    assert f"{q.kst(datetime(2026, 10, 7, 3, 0, tzinfo=timezone.utc)):%Y. %m. %d}" == "2026. 10. 07"
 
 
 def test_incoterm_rule_table():

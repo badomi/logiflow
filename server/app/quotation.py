@@ -20,8 +20,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Side
@@ -29,7 +30,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from . import drafts
-from .config import settings
+from .config import KST, settings
 from .extraction import ports
 from .models import Case, ContainerType, LaneRule, Quote, QuoteItem, QuoteTotal, Rate
 
@@ -135,6 +136,16 @@ def charge_part(rate: Rate) -> str | None:
     return None
 
 
+def same_table_rows(rows: list[Rate]) -> list[Rate]:
+    """요율표가 여러 벌 올라와 있을 때 비용이 겹치지 않게 한다.
+
+    항구를 정하지 않은 공통 비용(ALL — 서류비·B/L·보험 등)은 '그 요율표가 이 구간의 요율을 갖고 있을 때'만 쓴다.
+    예) 인천→시드니는 A 요율표에만 있는데 B 요율표의 공통 서류비·보험료까지 붙어 서류비·보험료가 두 번 청구되는 것을 막는다.
+    """
+    lane_sources = {r.source for r in rows if r.pol or r.pod}
+    return [r for r in rows if r.pol or r.pod or r.source in lane_sources]
+
+
 def rates_with_reason(session: Session, qi, on_date, carrier: str | None = None) -> tuple[list[Rate], str | None]:
     """견적에 쓸 요율 행과, 못 쓰면 그 이유 (FR-501: 요율이 모자라면 견적을 만들지 않는다)."""
     lane = f"{qi.pol}→{qi.pod} {qi.containerType}"
@@ -155,6 +166,7 @@ def rates_with_reason(session: Session, qi, on_date, carrier: str | None = None)
     # (조건별로 비용을 빼기 전에 본다: 수입 CIF처럼 공통 도착지 비용만 남는 견적도 구간 요율이 있어야 한다)
     if not any(r.pol or r.pod for r in rows):
         return [], f"요율 미등록 구간 {lane} (FR-501)"
+    rows = same_table_rows(rows)
     role = trade_role(qi)
     if role is None:
         return [], f"수출·수입을 구분할 수 없는 구간 {qi.pol}→{qi.pod} (선적항·도착항 모두 국내 아님) — 담당자 처리"
@@ -241,6 +253,7 @@ def money(value: float, currency: str) -> float:
 
 
 def build(session: Session, case: Case, extraction: dict | None = None) -> dict | None:
+    started = time.perf_counter()  # 견적서 생성 시간 측정 (NFR-02: 10초 이내)
     qi = case.quote_input
     stated = ((extraction or {}).get("fields") or {}).get("containerCount") or {}
     count, count_note = container_count(session, qi, stated.get("value") if stated.get("status") == "filled" else None)
@@ -303,7 +316,10 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
         if pdf:
             pdf_path = _save(case, quote, "pdf", pdf)
     session.flush()
+    elapsed_ms = round((time.perf_counter() - started) * 1000)
     return {
+        "elapsedMs": elapsed_ms,  # 요율 조회·금액 계산·XLSX·PDF 생성까지 걸린 시간
+        "withinLimit": elapsed_ms <= QUOTE_TIME_LIMIT_MS,
         "version": quote.version_no,
         "file": quote.xlsx_path,
         "pdf": pdf_path,
@@ -325,6 +341,7 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
 
 
 VALIDITY_MIN, VALIDITY_MAX = 1, 14
+QUOTE_TIME_LIMIT_MS = 10_000  # NFR-02: 견적서 생성 10초 이내
 
 
 def valid_until_date(today: date, days: int, rates: list[Rate]) -> date:
@@ -392,8 +409,9 @@ TEXT = {
         "greeting1": "* Thank you for your inquiry.",
         "greeting2": "* We are pleased to quote as below for your reference.",
         "rt_basis": " (based on {rt} R/T)",
-        "fx": "* Exchange rate on the actual sailing date will be applied.",
-        "subject_to_change": "* The above quotation is subject to change according to cargo details.",
+        # FR-508: 견적 통화·환율 기준일 명시 + '유효기간 내 환율 변동에 따라 변동될 수 있음' 고지
+        "fx": "* Quote currency: {currency} / Exchange rate as of {as_of} (rate on the actual sailing date applies).",
+        "subject_to_change": "* Subject to change with exchange rate fluctuation within validity and with cargo details.",
         "carrier": "* CARRIER : {carrier}",
         "transit": "* T/T : approx. {days} days",
         "free_time": "* FREE TIME : DET {det} days / DEM {dem} days",
@@ -409,8 +427,8 @@ TEXT = {
         "subject": "Subject : 해상 수출 운임 제안서  [{case_id}]",
         "greeting1": None, "greeting2": None,  # 양식에 적힌 문구를 그대로 둔다
         "rt_basis": " ({rt} R/T 기준)",
-        "fx": "* 실제 출항일 환율 적용",
-        "subject_to_change": "* 화물 DETAIL의 변경에 따라 상기 견적이 달라 질 수 있습니다.",
+        "fx": "* 견적 통화 {currency} · 환율 기준일 {as_of} (실제 출항일 환율 적용)",
+        "subject_to_change": "* 유효기간 내 환율 변동 및 화물 DETAIL의 변경에 따라 상기 견적이 달라질 수 있습니다.",
         "carrier": "* 선사 : {carrier}",
         "transit": "* T/T : 약 {days}일",
         "free_time": "* FREE TIME : DET {det}일 / DEM {dem}일",
@@ -444,6 +462,13 @@ def item_remark(item: QuoteItem, lang: str) -> str:
     for korean, english in REMARK_EN:
         text = text.replace(korean, english)
     return fallback if _HANGUL.search(text) else text
+
+
+def kst(moment):
+    """DB의 시각(UTC, 시간대 표시가 없을 수 있음) → 한국 시각. 견적서 DATE가 자정~오전 9시에 하루 전으로 찍히지 않게 한다."""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(KST)
 
 
 def recipient_line(case: Case, lang: str) -> str:
@@ -552,7 +577,7 @@ def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: 
             ws["C19"] = cargo
             headers = ("RATE", "Q'TY", "AMOUNT")
     ws["C20"] = f": {qi.incoterms}"  # 발주 측 양식은 이 줄(PAYMENT TERM)에 인코텀즈를 적는다 (예시 견적서 기준)
-    ws["F21"] = f"DATE : {quote.created_at:%Y. %m. %d}" if quote.created_at else "DATE :"
+    ws["F21"] = f"DATE : {kst(quote.created_at):%Y. %m. %d}" if quote.created_at else "DATE :"
     ws["E21"] = None
     ws["C22"], ws["D22"], ws["E22"] = headers
 
@@ -579,7 +604,8 @@ def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: 
         ws.row_dimensions[row].hidden = True  # 쓰지 않은 비용 줄은 숨긴다 (예시처럼 쓴 줄만 보이게)
     ws[f"C{TOTAL_ROW}"] = total_text(quote)
 
-    remarks = [t["fx"], t["subject_to_change"]]
+    as_of = qi.exchangeRateAsOf or (f"{kst(quote.created_at):%Y-%m-%d}" if quote.created_at else "-")
+    remarks = [t["fx"].format(currency=qi.quoteCurrency or "USD", as_of=as_of), t["subject_to_change"]]
     if quote.etd or quote.eta:
         carrier = f" ({quote.carrier})" if quote.carrier else ""
         remarks.append(f"* ETD / ETA : {quote.etd or '-'} / {quote.eta or '-'}{carrier}")
