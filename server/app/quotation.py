@@ -309,6 +309,7 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
     session.flush()
 
     xlsx = render_xlsx(case, quote, count, count_note)
+    retire_files(case, version - 1)  # 이전 판의 PDF·XLSX를 함께 옮긴다 → 폴더에 서로 다른 판이 섞이지 않는다
     quote.xlsx_path = _save(case, quote, "xlsx", xlsx)
     pdf_path, pdf_note = None, None
     if settings.quote_pdf:
@@ -641,14 +642,35 @@ def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: 
 
 
 def _save(case: Case, quote: Quote, ext: str, data: bytes) -> str:
-    """storage/<케이스ID>/quotes/<케이스ID>_견적서.<ext> — 이전 버전은 quote-history/로 옮긴다."""
-    filename = f"{case.case_id}_견적서.{ext}"
-    current = settings.storage_dir / case.case_id / "quotes" / filename
-    if current.exists():
+    """storage/<케이스ID>/quotes/<케이스ID>_견적서.<ext> — 이전 판은 build()가 retire_files()로 먼저 옮긴다."""
+    return drafts.save_quote_file(case, f"{case.case_id}_견적서.{ext}", data)
+
+
+def retire_files(case: Case, version: int) -> list[str]:
+    """자동으로 만든 견적서(PDF·XLSX)를 quotes/에서 quote-history/로 함께 옮긴다. 옮긴 파일 이름을 돌려준다.
+
+    quotes/ 폴더의 파일은 [견적서 송부 초안]에 그대로 첨부된다. 그래서
+    - 새 판을 만들 때 이전 판의 PDF·XLSX를 한 번에 옮기고 (PDF 생성이 실패해도 옛 PDF가 남지 않게),
+    - 새 견적서를 만들지 못한 경우(정보부족·보류)에도 옛 견적서를 치운다.
+    담당자가 직접 올린 다른 이름의 파일은 건드리지 않는다.
+    """
+    moved: list[str] = []
+    for ext in ("xlsx", "pdf"):
+        current = settings.storage_dir / case.case_id / "quotes" / f"{case.case_id}_견적서.{ext}"
+        if not current.exists():
+            continue
         history = settings.storage_dir / case.case_id / "quote-history"
         history.mkdir(parents=True, exist_ok=True)
-        shutil.move(current, history / f"{case.case_id}_견적서_v{quote.version_no - 1}.{ext}")
-    return drafts.save_quote_file(case, filename, data)
+        target = history / f"{case.case_id}_견적서_v{version}.{ext}"
+        os.replace(current, target)  # 같은 이름이 있으면 덮어쓴다 (Windows 포함)
+        moved.append(target.name)
+    return moved
+
+
+def retire_current(session: Session, case: Case) -> list[str]:
+    """지금 조건으로는 견적서를 낼 수 없을 때 부른다 — 마지막 판 번호로 보관 폴더에 옮긴다."""
+    version = session.scalar(select(func.max(Quote.version_no)).where(Quote.case_pk == case.id)) or 0
+    return retire_files(case, version)
 
 
 # ------------------------------------------------------------------ PDF (LibreOffice)
