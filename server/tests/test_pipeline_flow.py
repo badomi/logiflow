@@ -862,6 +862,37 @@ def test_quote_date_is_korean_time():
     assert f"{q.kst(datetime(2026, 10, 7, 3, 0, tzinfo=timezone.utc)):%Y. %m. %d}" == "2026. 10. 07"
 
 
+def test_rate_table_memo_is_not_printed_on_quote():
+    """발주 측 요율표의 remark(내부 메모)는 영문이든 한글이든 견적서 REMARK 칸에 찍지 않는다."""
+    from types import SimpleNamespace as NS
+
+    from app import quotation as q
+
+    memo_en = NS(basis="PER_CNTR", remark="GRI increase; separate validity period (previous rate retained)",
+                 source_ref="OceanFreight#5")
+    memo_ko = NS(basis="PER_BL", remark="건당 1회", source_ref="Surcharges#11행 DOC")
+    for lang in ("en", "ko"):
+        assert q.item_remark(memo_en, lang) == "PER CNTR" and q.item_remark(memo_ko, lang) == "PER B/L"
+    # 시스템이 만든 보험 산정식과, 우리 양식으로 올린 요율의 비고(견적서용 문구)는 그대로 찍는다
+    insurance = NS(basis="PERCENT", remark="INV.V x 110% x 0.2% (MIN USD 30)", source_ref="Surcharges#14행 INS")
+    ours = NS(basis="PER_CNTR", remark="PER CNTR · INCLUSIVE ISPS(DIRECT)", source_ref=None)
+    assert q.item_remark(insurance, "en") == "INV.V x 110% x 0.2% (MIN USD 30)"
+    assert q.item_remark(ours, "en") == "PER CNTR · INCLUSIVE ISPS(DIRECT)"
+
+
+@pytest.mark.parametrize("lang", ["en", "ko"])
+def test_gri_rate_memo_stays_off_the_quote(client, client_rates, monkeypatch, lang):
+    """10/16 이후 HMM 운임 행의 비고는 'GRI 인상 → … (이전 행 보존)'이라는 내부 메모다 — 견적서에는 PER CNTR만."""
+    monkeypatch.setattr(settings, "quote_language", lang)
+    body = CLIENT_CASE.format(carrier="선사: HMM\n").replace("2026-10-05", "2026-10-20")
+    case = create(client, text_mail(body))
+    assert case["extraction"]["validation"]["quote"]["lines"][0]["source"] == "OceanFreight#5"  # GRI 인상 행
+    ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
+    remarks = [ws[f"F{r}"].value or "" for r in range(23, 35)]
+    assert remarks[0] == "PER CNTR"
+    assert not any(word in r for r in remarks for word in ("GRI", "예시", "건당", "취급료", "최저가"))
+
+
 def test_incoterm_rule_table():
     """수출자 기준 규칙과 수입자(반대) — DB 없이 규칙 표만 확인."""
     from types import SimpleNamespace as NS

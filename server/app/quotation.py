@@ -453,9 +453,21 @@ def language() -> str:
     return lang if lang in TEXT else "en"
 
 
+# 발주 측 요율표(OceanFreight·Surcharges 시트)에서 온 행의 근거 표기 (rates.py가 source_ref에 넣는다)
+CLIENT_TABLE_REFS = ("OceanFreight#", "Surcharges#")
+
+
 def item_remark(item: QuoteItem, lang: str) -> str:
-    """비용 줄의 REMARK 칸. 영문 견적서에서는 한글 비고를 영문으로 바꾸고, 바꿀 수 없으면 부과 기준을 적는다."""
+    """비용 줄의 REMARK 칸. 영문 견적서에서는 한글 비고를 영문으로 바꾸고, 바꿀 수 없으면 부과 기준을 적는다.
+
+    발주 측 요율표의 remark 칸은 요율 관리용 내부 메모다('GRI 인상 → 새 행으로 처리', '최저가 선택 규칙 예시' 등).
+    고객에게 나가는 견적서에는 언어와 관계없이 찍지 않고 부과 기준(PER CNTR 등)만 적는다.
+    화물가액 % 줄(보험)의 비고는 요율표 글자가 아니라 시스템이 만든 산정식이라 그대로 둔다.
+    """
     fallback = BASIS_LABEL.get(item.basis, "")
+    from_client_table = (getattr(item, "source_ref", None) or "").startswith(CLIENT_TABLE_REFS)
+    if from_client_table and item.basis != "PERCENT":
+        return fallback
     text = item.remark or fallback
     if lang != "en" or not _HANGUL.search(text):
         return text
