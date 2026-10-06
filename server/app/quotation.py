@@ -82,6 +82,59 @@ def choose_carrier(rows: list[Rate], wanted: str | None) -> tuple[list[Rate], st
     return keep, carrier
 
 
+# ---------------------------------------------------------------- 인코텀즈별 비용 분기 (FR-503, 발주 측 회신 2026-10-06)
+# 수출자 기준으로 견적에 넣는 비용 묶음. 수입자는 그 반대(수출자가 내지 않는 쪽)를 넣는다.
+#   EXW: 전부 제외 / FOB: 출발지 비용만 / CIF: 출발지 + 해상운임 + 보험 (도착지 제외) / DDP: 전부 (관세·부가세는 '별도' 표기)
+# 단, 수입 CIF는 발주 측 요율표 '조회예시' 시트(상하이→부산 CIF, 출발지·해상운임·도착지·보험 전부 합산)를 따른다.
+ORIGIN, FREIGHT, INSURANCE, DEST = "ORIGIN", "FREIGHT", "INSURANCE", "DEST"
+ALL_PARTS = frozenset({ORIGIN, FREIGHT, INSURANCE, DEST})
+EXPORTER_PAYS = {
+    "EXW": frozenset(),
+    "FOB": frozenset({ORIGIN}),
+    "CIF": frozenset({ORIGIN, FREIGHT, INSURANCE}),
+    "DDP": ALL_PARTS,
+}
+IMPORTER_PAYS = {**{terms: ALL_PARTS - pays for terms, pays in EXPORTER_PAYS.items()},
+                 "CIF": ALL_PARTS}  # 조회예시 기준 (수출자의 반대라면 도착지 비용만이지만 예시는 전부 넣는다)
+EXPORT, IMPORT = "EXPORT", "IMPORT"
+INSURANCE_CODES = ("INS", "INSURANCE")
+HOME_COUNTRY = "KR"
+
+
+def trade_role(qi) -> str | None:
+    """화주가 수출자인지 수입자인지 — 6장에 칸이 없어 항구 국가로 본다: 선적항이 국내면 수출, 도착항이 국내면 수입."""
+    if (qi.pol or "").upper().startswith(HOME_COUNTRY):
+        return EXPORT
+    if (qi.pod or "").upper().startswith(HOME_COUNTRY):
+        return IMPORT
+    return None
+
+
+def included_parts(incoterms: str | None, role: str | None) -> frozenset | None:
+    """이 조건·역할의 견적에 넣는 비용 묶음. 모르는 조건이면 None."""
+    if role is None:
+        return None
+    return (EXPORTER_PAYS if role == EXPORT else IMPORTER_PAYS).get((incoterms or "").upper())
+
+
+def charge_part(rate: Rate) -> str | None:
+    """요율 행이 어느 비용 묶음인지. None = 구분 없는 공통 비용(서류비·B/L 등) — 견적에 다른 비용이 있으면 함께 넣는다."""
+    code = (rate.charge_code or "").upper()
+    if code == "OCEAN_FREIGHT":
+        return FREIGHT
+    if code in INSURANCE_CODES:
+        return INSURANCE
+    direction = (rate.direction or "").upper()
+    if direction in (ORIGIN, DEST):
+        return direction
+    # 방향 칸이 없는 요율(우리 양식): 선적항만 적힌 행은 출발지 비용, 도착항만 적힌 행은 도착지 비용
+    if rate.pol and not rate.pod:
+        return ORIGIN
+    if rate.pod and not rate.pol:
+        return DEST
+    return None
+
+
 def rates_with_reason(session: Session, qi, on_date, carrier: str | None = None) -> tuple[list[Rate], str | None]:
     """견적에 쓸 요율 행과, 못 쓰면 그 이유 (FR-501: 요율이 모자라면 견적을 만들지 않는다)."""
     lane = f"{qi.pol}→{qi.pod} {qi.containerType}"
@@ -98,14 +151,23 @@ def rates_with_reason(session: Session, qi, on_date, carrier: str | None = None)
         .order_by(Rate.sort_no, Rate.id)
     ).all()
     rows = list(rows)
-    if qi.incoterms == "FOB":  # FOB: 해상운임·도착지 비용은 매수인 부담 → 출발지 비용만
-        rows = [r for r in rows if r.charge_code != "OCEAN_FREIGHT" and (r.direction or "").upper() != "DEST"]
-    rows, _ = choose_carrier(rows, carrier)
     # 구간(pol 또는 pod)이 지정된 요율이 하나도 없으면 '요율 없는 구간'으로 본다 — 공통 부대비용만으로 견적 금지
+    # (조건별로 비용을 빼기 전에 본다: 수입 CIF처럼 공통 도착지 비용만 남는 견적도 구간 요율이 있어야 한다)
     if not any(r.pol or r.pod for r in rows):
         return [], f"요율 미등록 구간 {lane} (FR-501)"
-    # CIF 등인데 이 도착항의 해상운임 요율이 없으면 견적 불가 (출발지 부대비용만으로 만들지 않는다)
-    if qi.incoterms in FREIGHT_REQUIRED and not any(r.charge_code == "OCEAN_FREIGHT" for r in rows):
+    role = trade_role(qi)
+    if role is None:
+        return [], f"수출·수입을 구분할 수 없는 구간 {qi.pol}→{qi.pod} (선적항·도착항 모두 국내 아님) — 담당자 처리"
+    parts = included_parts(qi.incoterms, role)
+    if parts is not None:
+        if not parts:
+            who = "수출자" if role == EXPORT else "수입자"
+            return [], f"{qi.incoterms} 조건의 {who}는 견적에 넣을 비용이 없습니다 (상대방 부담) — 담당자 확인 (FR-503)"
+        rows = [r for r in rows if charge_part(r) is None or charge_part(r) in parts]
+    rows, _ = choose_carrier(rows, carrier)
+    # 해상운임을 넣어야 하는 조건인데 이 구간의 해상운임 요율이 없으면 견적 불가 (부대비용만으로 만들지 않는다)
+    needs_freight = FREIGHT in parts if parts is not None else qi.incoterms in FREIGHT_REQUIRED
+    if needs_freight and not any(r.charge_code == "OCEAN_FREIGHT" for r in rows):
         return [], f"해상운임 요율 없음 {lane} {qi.incoterms} (FR-501)"
     # 터미널 비용(THC·OTHC·DTHC)이 없으면 부대비용 요율이 없는 것 — 해상운임만 있는 불완전한 견적을 만들지 않는다
     if not any("THC" in (r.charge_code or "") for r in rows):
@@ -211,7 +273,7 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
         eta = (date.fromisoformat(etd) + timedelta(days=qi.transitTime)).isoformat()  # ETA = ETD + 운송일수
 
     version = (session.scalar(select(func.max(Quote.version_no)).where(Quote.case_pk == case.id)) or 0) + 1
-    quote = Quote(case=case, version_no=version, valid_until=(today + timedelta(days=qi.validityDays)).isoformat(),
+    quote = Quote(case=case, version_no=version, valid_until=valid_until_date(today, qi.validityDays, rates).isoformat(),
                   carrier=carrier, etd=etd, eta=eta)
     totals: dict[str, float] = {}
     for rate in rates:
@@ -253,6 +315,7 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
         "containerCountNote": count_note,
         "rateSources": sorted({r.source for r in rates if r.source}),
         "rateDate": on_date.isoformat(),
+        "tradeRole": trade_role(qi),
         "carrier": carrier,
         "carrierRequested": wanted_carrier,
         "etd": etd, "eta": eta,
@@ -264,6 +327,13 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
 VALIDITY_MIN, VALIDITY_MAX = 1, 14
 
 
+def valid_until_date(today: date, days: int, rates: list[Rate]) -> date:
+    """견적 유효기간 = 발행일 + 유효일수(달력일). 견적에 쓴 요율의 종료일이 더 빠르면 그날까지 (발주 측 회신 2026-10-06)."""
+    until = today + timedelta(days=days)
+    ends = [r.valid_until for r in rates if r.valid_until is not None]
+    return min([until, *ends])
+
+
 def default_validity_days() -> int:
     """견적 유효기간 기본값(일). .env의 QUOTE_VALIDITY_DAYS로 1~14 중에서 고른다 (범위를 벗어나면 1 또는 14)."""
     try:
@@ -273,13 +343,22 @@ def default_validity_days() -> int:
     return min(VALIDITY_MAX, max(VALIDITY_MIN, days))
 
 
+INSURED_VALUE_RATIO = 1.10  # 보험료 = 계약금액 × 110% × 보험요율 (발주 측 회신 2026-10-06)
+
+
 def percent_amount(rate: Rate, qi) -> tuple[float | None, str | None]:
-    """화물가액 × 비율, 최저 금액 (예: 보험 15,000 × 0.2% = 30, 최저 30). 통화가 다르면 계산하지 않는다(환율 미반영)."""
+    """화물가액 × 비율, 최저 금액. 보험료는 계약금액의 110%에 보험요율을 곱한다 (예: 15,000 × 110% × 0.2% = 33, 최저 30).
+
+    통화가 다르면 계산하지 않는다(환율 미반영).
+    """
     pct = rate.rate_pct or 0
-    label = f"INV.V x {pct * 100:g}%" + (f" (MIN {rate.currency} {rate.min_amount:,.0f})" if rate.min_amount else "")
+    insured = (rate.charge_code or "").upper() in INSURANCE_CODES
+    ratio = INSURED_VALUE_RATIO if insured else 1.0
+    label = ("INV.V x 110% x " if insured else "INV.V x ") + f"{pct * 100:g}%" + (
+        f" (MIN {rate.currency} {rate.min_amount:,.0f})" if rate.min_amount else "")
     if qi.invoiceValue is None or (qi.ccy and qi.ccy != rate.currency):
         return None, f"{label} — 인보이스 통화가 달라 실비 청구"
-    amount = max(qi.invoiceValue * pct, rate.min_amount or 0)
+    amount = max(qi.invoiceValue * ratio * pct, rate.min_amount or 0)
     return money(amount, rate.currency), label
 
 
@@ -319,6 +398,8 @@ TEXT = {
         "transit": "* T/T : approx. {days} days",
         "free_time": "* FREE TIME : DET {det} days / DEM {dem} days",
         "validity": "* VALIDITY : {date}",
+        "dest_consignee": "* Destination charges are for consignee's account.",
+        "duty_separate": "* Customs duty and VAT are not included and will be charged separately.",
         "quote_no": "* QUOTE NO. : {case_id} (Rev. {version})",
         "thanks": "* Thank you.", "seal": "(Company seal omitted)",
     },
@@ -334,6 +415,8 @@ TEXT = {
         "transit": "* T/T : 약 {days}일",
         "free_time": "* FREE TIME : DET {det}일 / DEM {dem}일",
         "validity": "* VALIDITY : {date}",
+        "dest_consignee": "* 도착지 비용 수하인 부담",
+        "duty_separate": "* 관세·부가세 별도",
         "quote_no": "* 견적번호 : {case_id} (v{version})",
         "thanks": None, "seal": None,
     },
@@ -379,6 +462,16 @@ def recipient_line(case: Case, lang: str) -> str:
         except Exception:  # noqa: BLE001 — 수신 줄 때문에 견적서가 실패하면 안 된다
             fallback = ""
     return t["to_one"].format(name=fallback).replace(" 님", "") if lang == "ko" else t["to_one"].format(name=fallback)
+
+
+def incoterm_remarks(incoterms: str | None, lang: str) -> list[str]:
+    """조건별 고지 문구 (발주 측 회신 2026-10-06): FOB·CIF는 '도착지 비용 수하인 부담', DDP는 관세·부가세 '별도'."""
+    t, terms = TEXT[lang], (incoterms or "").upper()
+    if terms in ("FOB", "CIF"):
+        return [t["dest_consignee"]]
+    if terms == "DDP":
+        return [t["duty_separate"]]
+    return []
 
 
 def count_note_text(note: str, lang: str) -> str:
@@ -498,6 +591,7 @@ def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: 
         remarks.append(t["free_time"].format(det=qi.freeTimeDet or "-", dem=qi.freeTimeDem or "-"))
     if count_note:
         remarks.append(f"* {count_note_text(count_note, lang)}")
+    remarks.extend(incoterm_remarks(qi.incoterms, lang))
     remarks.append(t["validity"].format(date=_korean_date(quote.valid_until) if lang == "ko" else quote.valid_until or ""))
     remarks.append(t["quote_no"].format(case_id=case.case_id, version=quote.version_no))
     for offset, row in enumerate(range(REMARK_FIRST_ROW, REMARK_LAST_ROW + 1)):
