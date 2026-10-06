@@ -790,6 +790,9 @@ def test_client_import_fob_has_freight_and_destination(client, client_rates):
     assert any("FREE TIME : DET 7 days / DEM 7 days" in r for r in remarks)
     assert "* Destination charges are for consignee's account." in remarks  # FOB·CIF 견적서 고지
     assert fields["pol"]["value"] == "CNSHA" and detail["status"] == "계산완료"
+    # 수입 FOB 견적서에는 도착항까지 적는다 (POL만 적는 양식은 수출 FOB 전용)
+    assert ws["B17"].value != "** POL" and "BUSAN" in ws["C17"].value.upper() and " - " in ws["C17"].value
+    assert quote["scheduleUnconfirmed"] is False
 
 
 def test_client_rates_lowest_carrier_when_not_specified(client, client_rates):
@@ -956,3 +959,135 @@ def test_client_rates_bad_file_changes_nothing(client, client_rates):
     res = client.post("/api/rates/import", files={"file": ("bad.xlsx", buf.getvalue(), "application/octet-stream")})
     assert res.status_code == 400 and any("OceanFreight 5행 pod" in e for e in res.json()["detail"]["errors"])
     assert client.get("/api/rates/summary").json()  # 기존 요율은 그대로
+
+
+# ------------------------------------------------------------------ 옛 견적서 정리 · 0 이하 값 차단
+
+
+def quote_folder(case_id: str, name: str = "quotes") -> list[str]:
+    folder = settings.storage_dir / case_id / name
+    return sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []
+
+
+def test_old_quote_is_not_attached_when_no_new_quote(client, connect, session):
+    """견적서를 낸 뒤 조건이 바뀌어 보류·정보부족이 되면, 옛 견적서는 송부 초안에 붙지 않는다."""
+    from app import services
+
+    case_id = create(client, text_mail(FULL_LCL))["caseId"]
+    assert quote_folder(case_id) == [f"{case_id}_견적서.xlsx"]
+    case = services.get_case(session, case_id)
+    pod, case.quote_input.pod = case.quote_input.pod, "USNYC"  # 요율이 없는 구간으로 바뀜
+    result = RuleValidator().validate(session, case, {})
+    assert result["status"] == "보류" and result["quoteRetired"] == [f"{case_id}_견적서_v1.xlsx"]
+    assert quote_folder(case_id) == [] and quote_folder(case_id, "quote-history") == [f"{case_id}_견적서_v1.xlsx"]
+
+    case.quote_input.pod, case.quote_input.incoterms = pod, None  # 요율은 있지만 필수 항목이 빠짐
+    assert RuleValidator().validate(session, case, {})["status"] == "정보부족" and quote_folder(case_id) == []
+
+
+def test_pdf_and_xlsx_are_always_the_same_version(client, connect, session, monkeypatch):
+    """새 판에서 PDF를 못 만들어도 옛 PDF가 남아 새 XLSX와 섞이지 않는다."""
+    from app import quotation, quote_pdf, services
+
+    monkeypatch.setattr(settings, "quote_pdf", True)
+    monkeypatch.setattr(quotation, "find_soffice", lambda: None)
+    case_id = create(client, text_mail(FULL_LCL))["caseId"]
+    assert quote_folder(case_id) == [f"{case_id}_견적서.pdf", f"{case_id}_견적서.xlsx"]
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("pdf engine down")
+
+    monkeypatch.setattr(quote_pdf, "render_pdf", broken)
+    result = RuleValidator().validate(session, services.get_case(session, case_id), {})
+    assert result["quote"]["version"] == 2 and result["quote"]["pdf"] is None
+    assert quote_folder(case_id) == [f"{case_id}_견적서.xlsx"]  # 2판 XLSX만 — 1판 PDF는 없다
+    assert quote_folder(case_id, "quote-history") == [f"{case_id}_견적서_v1.pdf", f"{case_id}_견적서_v1.xlsx"]
+
+
+@pytest.mark.parametrize("field,asked", [
+    ("boxL", "volume"), ("boxW", "volume"), ("boxH", "volume"), ("totalCbm", "volume"),
+    ("grossWeightKg", "grossWeightKg"), ("invoiceValue", "invoiceValue"),
+])
+@pytest.mark.parametrize("value", [0, -5])
+def test_zero_or_negative_values_are_blocked(client, connect, session, field, asked, value):
+    """FR-302: 치수·부피·중량·금액이 0 이하면 견적을 내지 않고 다시 묻는다."""
+    from app import services
+
+    case = services.get_case(session, create(client, text_mail(FULL_LCL))["caseId"])
+    assert not [i for i in validation.check(session, case.quote_input, today=TODAY) if i["code"] == "INVALID"]
+    setattr(case.quote_input, field, value)
+    issues = [i for i in validation.check(session, case.quote_input, today=TODAY) if i["code"] == "INVALID"]
+    assert [(i["field"], i["severity"]) for i in issues] == [(asked, "Block")] and issues[0]["question"]
+    assert RuleValidator().validate(session, case, {})["status"] == "정보부족"
+
+
+def test_all_zero_box_size_is_one_question(client, connect, session):
+    from app import services
+
+    qi = services.get_case(session, create(client, text_mail(FULL_LCL))["caseId"]).quote_input
+    qi.boxL = qi.boxW = qi.boxH = 0
+    assert [i["field"] for i in validation.check(session, qi, today=TODAY) if i["code"] == "INVALID"] == ["volume"]
+
+
+def test_hold_reason_tells_expired_rate_from_unregistered_lane(client, client_rates):
+    """화물 준비일이 요율 유효기간(10/31) 뒤면 '미등록 구간'이 아니라 '그 날짜에 유효한 요율 없음'으로 알린다."""
+    late = create(client, text_mail(CLIENT_CASE.format(carrier="").replace("2026-10-05", "2026-11-20")))
+    message = late["extraction"]["validation"]["hold"][0]["message"]
+    assert late["status"] == "보류" and "2026-11-20 기준으로 유효한 요율이 없습니다" in message and "2026-10-31" in message
+    in_time = create(client, text_mail(CLIENT_CASE.format(carrier="")))  # 유효기간 안이면 그대로 견적
+    assert in_time["status"] == "계산완료"
+
+
+def test_sailing_before_cargo_ready_date_is_not_printed(client, client_rates):
+    """FR-507: 요율표의 출항일(10/06)이 화물 준비일(10/10)보다 이르면 확정 일정처럼 적지 않는다."""
+    body = CLIENT_CASE.format(carrier="선사: HMM\n").replace("조건: CIF", "조건: FOB").replace("2026-10-05", "2026-10-10")
+    case = create(client, text_mail(body))
+    quote = case["extraction"]["validation"]["quote"]
+    assert case["status"] == "계산완료" and quote["totals"] == {"USD": 690.0}
+    assert (quote["etd"], quote["eta"], quote["scheduleUnconfirmed"]) == (None, None, True)
+    ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
+    remarks = [ws[f"B{r}"].value or "" for r in range(39, 48)]
+    assert any("ETD / ETA : to be confirmed (HMM)" in r for r in remarks) and not any("2026-10-06" in r for r in remarks)
+    assert any("QUOTE NO." in r for r in remarks)  # 비고 칸이 넘치지 않는다
+
+
+def test_cif_without_insurance_rate_is_held(client, client_rates, session):
+    """CIF인데 보험 요율이 없으면 보험료가 빠진 견적을 내지 않는다."""
+    from sqlalchemy import delete
+    from app.models import Rate
+
+    session.execute(delete(Rate).where(Rate.charge_code.in_(["INS", "INSURANCE"]), Rate.source == "발주측 요율표"))
+    session.commit()
+    cif = create(client, text_mail(CLIENT_CASE.format(carrier="")))
+    assert cif["status"] == "보류" and "보험료 요율 없음" in cif["extraction"]["validation"]["hold"][0]["message"]
+    fob = create(client, text_mail(CLIENT_CASE.format(carrier="").replace("조건: CIF", "조건: FOB"), subject="FOB 건"))
+    assert fob["status"] == "계산완료"  # 보험이 조건에 없는 FOB는 그대로 견적
+
+
+def test_same_charge_in_two_tables_is_charged_once():
+    """같은 구간·기간의 요율표 두 개에 THC·서류비가 모두 있어도 한 번만 넣는다."""
+    from types import SimpleNamespace as NS
+    from app import quotation as q
+
+    def row(i, code, source):
+        return NS(id=i, charge_code=code, source=source)
+
+    rows = [row(1, "THC", "TEST: 예시"), row(2, "DOC", "TEST: 예시"), row(3, "SEAL", "TEST: 예시"),
+            row(4, "THC", "발주측 요율표"), row(5, "DOC", "발주측 요율표"),
+            row(6, "OCEAN_FREIGHT", "TEST: 예시"), row(7, "OCEAN_FREIGHT", "발주측 요율표")]
+    assert [r.id for r in q.one_table_per_charge(rows)] == [3, 4, 5, 6, 7]  # 실제 요율표 우선, 한쪽에만 있는 비용은 유지
+    two_real = [row(1, "THC", "요율표 A"), row(2, "THC", "요율표 B")]
+    assert [r.id for r in q.one_table_per_charge(two_real)] == [2]  # 둘 다 실제 요율표면 나중에 올린 것
+
+
+def test_review_value_is_not_used_as_confirmed(client, connect, session):
+    """이전 메일의 값이 남아 있어도, 최신 추출이 그 항목을 '확인 필요'로 보면 견적하지 않고 다시 묻는다."""
+    from app import services
+
+    case = services.get_case(session, create(client, text_mail(FULL_LCL))["caseId"])
+    doubt = {"fields": {"grossWeightKg": {"status": "review", "value": None, "evidence": "총중량은 확인 후 다시 알려드리겠습니다"}}}
+    result = RuleValidator().validate(session, case, doubt)
+    issue = next(i for i in result["issues"] if i["field"] == "grossWeightKg")
+    assert result["status"] == "정보부족" and issue["code"] == "REVIEW" and "확인 후 다시" in issue["question"]
+    fixed = RuleValidator().validate(session, case, {**doubt, "lockedByManual": ["grossWeightKg"]})
+    assert fixed["status"] == "계산완료"  # 담당자가 직접 고친 값은 확정값

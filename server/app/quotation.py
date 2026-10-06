@@ -146,6 +146,26 @@ def same_table_rows(rows: list[Rate]) -> list[Rate]:
     return [r for r in rows if r.pol or r.pod or r.source in lane_sources]
 
 
+def one_table_per_charge(rows: list[Rate]) -> list[Rate]:
+    """같은 비용 항목(THC·서류비 등)이 두 요율표에 모두 있으면 한 요율표의 것만 쓴다 — 두 번 청구하지 않는다.
+
+    우선순위: 실제 요율표(이름이 TEST로 시작하지 않는 것) → 나중에 올린 요율표. 해상운임은 choose_carrier가 하나만 고른다.
+    서로 다른 비용을 나눠 가진 요율표(예: 해상운임 표 + 국내 부대비용 표)는 그대로 함께 쓴다.
+    """
+    newest: dict = {}
+    for r in rows:
+        newest[r.source] = max(newest.get(r.source, 0), r.id or 0)
+
+    def rank(source):
+        return ((source or "").startswith("TEST"), -newest[source])
+
+    sources: dict = {}
+    for r in rows:
+        sources.setdefault(r.charge_code, set()).add(r.source)
+    keep = {code: min(found, key=rank) for code, found in sources.items()}
+    return [r for r in rows if r.charge_code == "OCEAN_FREIGHT" or r.source == keep[r.charge_code]]
+
+
 def rates_with_reason(session: Session, qi, on_date, carrier: str | None = None) -> tuple[list[Rate], str | None]:
     """견적에 쓸 요율 행과, 못 쓰면 그 이유 (FR-501: 요율이 모자라면 견적을 만들지 않는다)."""
     lane = f"{qi.pol}→{qi.pod} {qi.containerType}"
@@ -165,6 +185,17 @@ def rates_with_reason(session: Session, qi, on_date, carrier: str | None = None)
     # 구간(pol 또는 pod)이 지정된 요율이 하나도 없으면 '요율 없는 구간'으로 본다 — 공통 부대비용만으로 견적 금지
     # (조건별로 비용을 빼기 전에 본다: 수입 CIF처럼 공통 도착지 비용만 남는 견적도 구간 요율이 있어야 한다)
     if not any(r.pol or r.pod for r in rows):
+        # 날짜만 안 맞는 경우(화물 준비일이 요율 유효기간 밖)는 '미등록'이 아니다 → 사유를 구분해 알린다
+        other_dates = [r for r in session.scalars(select(Rate).where(
+            _applies(Rate.pol, qi.pol), _applies(Rate.pod, qi.pod),
+            _applies(Rate.container_type, qi.containerType), _applies(Rate.incoterms, qi.incoterms),
+        )).all() if r.pol or r.pod]
+        if other_dates:
+            starts = [r.valid_from for r in other_dates if r.valid_from]
+            ends = [r.valid_until for r in other_dates if r.valid_until]
+            period = f"{min(starts) if starts else ''} ~ {max(ends) if ends else ''}"
+            return [], (f"{on_date} 기준으로 유효한 요율이 없습니다 {lane} "
+                        f"(등록된 요율 기간 {period}) — 요율표 갱신 필요 (FR-501)")
         return [], f"요율 미등록 구간 {lane} (FR-501)"
     rows = same_table_rows(rows)
     role = trade_role(qi)
@@ -176,6 +207,7 @@ def rates_with_reason(session: Session, qi, on_date, carrier: str | None = None)
             who = "수출자" if role == EXPORT else "수입자"
             return [], f"{qi.incoterms} 조건의 {who}는 견적에 넣을 비용이 없습니다 (상대방 부담) — 담당자 확인 (FR-503)"
         rows = [r for r in rows if charge_part(r) is None or charge_part(r) in parts]
+    rows = one_table_per_charge(rows)
     rows, _ = choose_carrier(rows, carrier)
     # 해상운임을 넣어야 하는 조건인데 이 구간의 해상운임 요율이 없으면 견적 불가 (부대비용만으로 만들지 않는다)
     needs_freight = FREIGHT in parts if parts is not None else qi.incoterms in FREIGHT_REQUIRED
@@ -184,6 +216,10 @@ def rates_with_reason(session: Session, qi, on_date, carrier: str | None = None)
     # 터미널 비용(THC·OTHC·DTHC)이 없으면 부대비용 요율이 없는 것 — 해상운임만 있는 불완전한 견적을 만들지 않는다
     if not any("THC" in (r.charge_code or "") for r in rows):
         return [], f"국내 부대비용(THC 등) 요율 없음 {qi.pol} {qi.containerType} (FR-501)"
+    # CIF는 보험료가 조건에 포함된다 — 보험 요율이 없으면 보험료가 조용히 빠진 견적을 만들지 않는다
+    if ((qi.incoterms or "").upper() == "CIF" and (parts is None or INSURANCE in parts)
+            and not any(charge_part(r) == INSURANCE for r in rows)):
+        return [], f"보험료 요율 없음 {lane} CIF — 보험료가 빠진 견적은 만들지 않습니다 (FR-501)"
     return list(rows), None
 
 
@@ -284,6 +320,14 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
     eta = freight.eta if freight else None
     if etd and not eta and qi.transitTime:
         eta = (date.fromisoformat(etd) + timedelta(days=qi.transitTime)).isoformat()  # ETA = ETD + 운송일수
+    # 요율표의 출항일이 선적 기준일(화물 준비일, 지났으면 오늘)보다 이르면 탈 수 없는 배다 → 확정 일정처럼 적지 않는다 (FR-507)
+    schedule_unconfirmed = False
+    try:
+        schedule_unconfirmed = bool(etd) and date.fromisoformat(etd) < on_date
+    except ValueError:
+        schedule_unconfirmed = True
+    if schedule_unconfirmed:
+        etd = eta = None
 
     version = (session.scalar(select(func.max(Quote.version_no)).where(Quote.case_pk == case.id)) or 0) + 1
     quote = Quote(case=case, version_no=version, valid_until=valid_until_date(today, qi.validityDays, rates).isoformat(),
@@ -308,7 +352,11 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
     session.add(quote)
     session.flush()
 
-    xlsx = render_xlsx(case, quote, count, count_note)
+    try:
+        xlsx = render_xlsx(case, quote, count, count_note, schedule_unconfirmed)
+    except Exception:
+        retire_files(case, version - 1)  # 새 견적서를 못 만들고 '실패'로 끝나도 옛 견적서가 송부 초안에 남지 않게
+        raise
     retire_files(case, version - 1)  # 이전 판의 PDF·XLSX를 함께 옮긴다 → 폴더에 서로 다른 판이 섞이지 않는다
     quote.xlsx_path = _save(case, quote, "xlsx", xlsx)
     pdf_path, pdf_note = None, None
@@ -336,6 +384,7 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
         "carrier": carrier,
         "carrierRequested": wanted_carrier,
         "etd": etd, "eta": eta,
+        "scheduleUnconfirmed": schedule_unconfirmed,  # True = 준비일 이후 출항 스케줄이 요율표에 없음 → 담당자 확인
         "lines": [{"charge": i.charge_label, "amount": i.amount, "currency": i.currency, "source": i.source_ref}
                   for i in quote.items],  # 금액별 근거 (어느 요율표 행) FR-509
     }
@@ -414,6 +463,7 @@ TEXT = {
         "fx": "* Quote currency: {currency} / Exchange rate as of {as_of} (rate on the actual sailing date applies).",
         "subject_to_change": "* Subject to change with exchange rate fluctuation within validity and with cargo details.",
         "carrier": "* CARRIER : {carrier}",
+        "schedule_tbc": "* ETD / ETA : to be confirmed{carrier} (no sailing on or after the cargo ready date in the current schedule)",
         "transit": "* T/T : approx. {days} days",
         "free_time": "* FREE TIME : DET {det} days / DEM {dem} days",
         "validity": "* VALIDITY : {date}",
@@ -431,6 +481,7 @@ TEXT = {
         "fx": "* 견적 통화 {currency} · 환율 기준일 {as_of} (실제 출항일 환율 적용)",
         "subject_to_change": "* 유효기간 내 환율 변동 및 화물 DETAIL의 변경에 따라 상기 견적이 달라질 수 있습니다.",
         "carrier": "* 선사 : {carrier}",
+        "schedule_tbc": "* ETD / ETA : 확인 후 안내{carrier} (화물 준비일 이후 출항 스케줄 미등록)",
         "transit": "* T/T : 약 {days}일",
         "free_time": "* FREE TIME : DET {det}일 / DEM {dem}일",
         "validity": "* VALIDITY : {date}",
@@ -540,7 +591,8 @@ def _box(ws, row: int, first: str, last: str) -> None:
         )
 
 
-def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: str | None = None) -> bytes:
+def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: str | None = None,
+                schedule_unconfirmed: bool = False) -> bytes:
     """발주 측 양식(견적서_양식.xlsx)에 채운다. 머리글·표 제목은 예시 견적서(LCL·FOB PDF)를 따른다."""
     qi = case.quote_input
     items = quote.items
@@ -550,7 +602,8 @@ def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: 
     wb = load_workbook(settings.quote_template)
     ws = wb.active
     is_lcl = qi.containerType == "LCL"
-    is_fob_fcl = qi.incoterms == "FOB" and not is_lcl  # FOB 예시: 국내 비용만, POL만 표기
+    # FOB 예시(수출): 국내 비용만 내므로 POL만 표기. 수입 FOB는 해상운임·도착지 비용이 들어가므로 구간(POL - POD)을 적는다
+    is_fob_fcl = qi.incoterms == "FOB" and not is_lcl and trade_role(qi) == EXPORT
 
     # 인쇄: 양식의 인쇄 범위(A:F)를 한 페이지 폭에 맞춘다 — 없으면 회사 주소·DATE·REMARK(F열)가 2쪽으로 밀린다
     ws.sheet_properties.pageSetUpPr.fitToPage = True
@@ -619,7 +672,9 @@ def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: 
 
     as_of = qi.exchangeRateAsOf or (f"{kst(quote.created_at):%Y-%m-%d}" if quote.created_at else "-")
     remarks = [t["fx"].format(currency=qi.quoteCurrency or "USD", as_of=as_of), t["subject_to_change"]]
-    if quote.etd or quote.eta:
+    if schedule_unconfirmed:
+        remarks.append(t["schedule_tbc"].format(carrier=f" ({quote.carrier})" if quote.carrier else ""))
+    elif quote.etd or quote.eta:
         carrier = f" ({quote.carrier})" if quote.carrier else ""
         remarks.append(f"* ETD / ETA : {quote.etd or '-'} / {quote.eta or '-'}{carrier}")
     elif quote.carrier:

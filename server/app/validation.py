@@ -119,10 +119,21 @@ def check(session: Session, qi: QuoteInput, notes: list[dict] | None = None, tod
         issues.append({"field": field, "code": code, "severity": severity(code), "message": message,
                        "question": ask, **extra})
 
+    def stale(field: str):
+        """값은 있지만(이전 메일) 최신 추출이 그 항목을 '확인 필요'로 본 경우 — 옛 값으로 견적하지 않고 다시 묻는다."""
+        code = "UNPARSED" if review[field].get("reason") == "UNPARSED" else "REVIEW"
+        add(field, code, "새로 읽은 값이 확인 필요 — 기존 값으로 견적하지 않음 (FR-209)", confirm(field))
+
     note_codes = {(n["field"], n["code"]): n for n in notes}
 
+    for field in review:
+        if (field != "volume" and field not in rules()["required"] and field in rules()["labels"]
+                and getattr(qi, field, None) is not None):
+            stale(field)
     for field in rules()["required"]:
         if getattr(qi, field) is not None:
+            if field in review:
+                stale(field)
             continue
         if (field, "MULTIPLE_INCOTERMS") in note_codes:
             options = " / ".join(note_codes[(field, "MULTIPLE_INCOTERMS")]["value"])
@@ -155,9 +166,19 @@ def check(session: Session, qi: QuoteInput, notes: list[dict] | None = None, tod
             add("volume", "REVIEW", "추출 신뢰도 낮음 — 검토 필요 (FR-209)", confirm("volume"))
         else:
             add("volume", "MISSING", "boxL/W/H·totalCbm 모두 없음", rules()["questions"]["volume"])
+    elif "volume" in review:
+        stale("volume")
 
     if qi.qty is not None and qi.qty <= 0:
         add("qty", "INVALID", "0 초과여야 함", rules()["questions"]["qty"])
+    # 0 이하인 치수·부피·중량·금액은 계산에 쓸 수 없다 (FR-302). 치수·부피는 질문 하나로 묶는다.
+    bad_volume = [k for k in ("boxL", "boxW", "boxH", "totalCbm") if getattr(qi, k) is not None and getattr(qi, k) <= 0]
+    if bad_volume and not any(i["field"] == "volume" for i in issues):
+        add("volume", "INVALID", f"0 초과여야 함: {', '.join(bad_volume)}", rules()["questions"]["volume"])
+    for field in ("grossWeightKg", "invoiceValue"):
+        value = getattr(qi, field)
+        if value is not None and value <= 0:
+            add(field, "INVALID", "0 초과여야 함", rules()["questions"][field])
     if qi.packing is not None and qi.packing not in PACKINGS:
         add("packing", "INVALID", f"코드값 아님: {qi.packing}", rules()["questions"]["packing"])
     for side in ("pol", "pod"):
@@ -238,7 +259,12 @@ class RuleValidator:
         extraction = extraction or {}
         stated = (extraction.get("fields") or {}).get("containerCount") or {}
         count = stated.get("value") if stated.get("status") == "filled" else None
-        issues = check(session, qi, extraction.get("notes"), review=review_evidence(extraction), container_count=count)
+        # 담당자가 직접 고친 항목은 확정값이다 → '확인 필요' 대상에서 뺀다
+        locked = set(extraction.get("lockedByManual") or [])
+        if locked & {"boxL", "boxW", "boxH", "totalCbm"}:
+            locked.add("volume")
+        review = {k: v for k, v in review_evidence(extraction).items() if k not in locked}
+        issues = check(session, qi, extraction.get("notes"), review=review, container_count=count)
         questions = [i["question"] for i in issues if i["question"]]
         hold: list[dict] = []
         if extraction.get("multipleItems"):
@@ -268,6 +294,11 @@ class RuleValidator:
             else:
                 case.status = "계산완료"
                 result["quote"] = quote
+        if case.status != "계산완료":
+            # 새 견적서가 없는데 옛 견적서가 남아 있으면 송부 초안에 붙는다 → 보관 폴더로 옮긴다
+            retired = quotation.retire_current(session, case)
+            if retired:
+                result["quoteRetired"] = retired
         result["status"] = case.status
         levels = [i["severity"] for i in issues + hold]
         result["severityCount"] = {level: levels.count(level) for level in SEVERITIES}
