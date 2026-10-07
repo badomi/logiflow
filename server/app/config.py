@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     soffice_path: str | None = None  # 비우면 PATH·기본 설치 경로에서 찾는다
     pdf_timeout_s: float = 30.0
 
+    # 견적서 문구 언어 (FR-510: 견적서는 기본 영문). en: 영문 / ko: 발주 측 예시 견적서의 한글 문구
+    quote_language: str = "en"
+
+    # 견적 유효기간(일): 견적일로부터 며칠까지 유효한지 (FR-507 Valid Until). 1~14 중에서 고른다.
+    # 범위를 벗어난 값은 1 또는 14로 맞춘다. 구간룰에 유효일수가 등록된 구간은 그 값을 쓴다.
+    quote_validity_days: int = 14
+
     # 견적서 양식 (발주 측 제공 XLSX)
     quote_template: Path = SERVER_DIR.parent / "docs" / "양식" / "견적서_양식.xlsx"
 

@@ -16,6 +16,11 @@
     "ccy",
     "paymentTerm"
   ],
+  "severity": {
+    "_comment": "문제 코드별 심각도 (FR-301). Block=견적 산출 불가, Warn=산출 후 사람 검수, Info=참고. 여기 없는 코드는 default. 화주 문항·보류가 있는 코드는 Block으로 둘 것.",
+    "default": "Block",
+    "NO_WEIGHT_LIMIT": "Info"
+  },
   "cbmTolerance": 0.1,
   "holdOnDangerousGoods": true,
   "dangerousGoodsKeywords": [
@@ -54,6 +59,33 @@
     "TOXIC",
     "IMDG",
     "MSDS"
+  ],
+  "holdOnSpecialCargo": true,
+  "specialContainers": [
+    "40RF"
+  ],
+  "specialCargoKeywords": [
+    "냉동",
+    "냉장",
+    "신선식품",
+    "활어",
+    "생동물",
+    "초과규격",
+    "중량물",
+    "장척",
+    "FROZEN",
+    "CHILLED",
+    "REEFER",
+    "REFRIGERATED",
+    "PERISHABLE",
+    "LIVE ANIMAL",
+    "OOG",
+    "OUT OF GAUGE",
+    "OVERSIZE",
+    "HEAVY LIFT",
+    "BREAK BULK",
+    "FLAT RACK",
+    "OPEN TOP"
   ],
   "questions": {
     "commodity": "품목명을 알려 주세요. (Commodity / description of goods)",

@@ -103,13 +103,49 @@ def test_quote_xlsx_follows_template(client, connect):
     ws = load_workbook(settings.storage_dir / case_id / "quotes" / f"{case_id}_견적서.xlsx").active
     assert case_id in ws["B12"].value and ws["C17"].value == ": INCHEON - SYDNEY" and ws["C20"].value == ": CIF"
     assert ws["C35"].value == "USD500.00 + KRW140,203" and len(ws._images) == 1
-    # 예시 견적서 형식: 한 페이지 맞춤(F열 주소·DATE·REMARK 포함), R/T 기준, 쓰지 않은 줄 숨김, 한글 유효기간
+    # 예시 견적서 형식: 한 페이지 맞춤(F열 주소·DATE·REMARK 포함), R/T 기준, 쓰지 않은 줄 숨김. 문구는 기본 영문 (FR-510)
     assert ws.sheet_properties.pageSetUpPr.fitToPage and ws.page_setup.fitToWidth == 1
     assert ws["F2"].value == "LEONA SEA & AIR CO., LTD." and ws["F21"].value.startswith("DATE : 20")
-    assert ws["D22"].value == "R/T" and ws["C19"].value.endswith("(1 R/T 기준)")
-    assert ws["B29"].value == "CUSTOMS CLEARANCE FEE" and ws["F29"].value == "INV.V x 1/1,000 (MIN 기준)"
+    assert ws["D22"].value == "R/T" and ws["C19"].value.endswith("(based on 1 R/T)")
+    assert ws["B29"].value == "CUSTOMS CLEARANCE FEE" and ws["F29"].value == "INV.V x 1/1,000 (MIN)"
     assert ws.row_dimensions[31].hidden and not ws.row_dimensions[30].hidden
-    assert any(ws[f"B{r}"].value.startswith("* VALIDITY : 2026년") for r in range(39, 45) if ws[f"B{r}"].value)
+    assert any(ws[f"B{r}"].value.startswith("* VALIDITY : 2026-") for r in range(39, 45) if ws[f"B{r}"].value)
+
+
+def fixed_text(ws) -> str:
+    """견적서에서 시스템이 쓰는 고정 문구 칸 (화주가 적은 값이 들어가는 수신·화물 줄은 뺀다)."""
+    refs = ["B10", "B12", "B14", "B15", "B48", "F49", *[f"B{r}" for r in range(38, 48)], *[f"F{r}" for r in range(22, 36)]]
+    return "\n".join(str(ws[ref].value) for ref in refs if ws[ref].value)
+
+
+def test_quote_is_english_by_default(client, connect):
+    """FR-510: 견적서는 기본 영문 — 고정 문구·비고에 한글이 없다."""
+    case_id = create(client, text_mail(FULL_LCL))["caseId"]
+    ws = load_workbook(settings.storage_dir / case_id / "quotes" / f"{case_id}_견적서.xlsx").active
+    text = fixed_text(ws)
+    assert not [ch for ch in text if "가" <= ch <= "힣"], text
+    assert ws["B10"].value == "From : LEONA SEA & AIR CO., LTD. / Quotation Team"
+    assert ws["B12"].value == f"Subject : Ocean Freight Quotation  [{case_id}]"
+    # 회사명·담당자명이 없는 메일이면 수신 줄에 회신 주소를 적는다 (빈 줄로 나가지 않게)
+    assert ws["B9"].value == "To : buyer@abc-trading.example.com" and ws["B48"].value == "* Thank you."
+    assert f"* QUOTE NO. : {case_id} (Rev. 1)" in text
+    # FR-508: 견적 통화·환율 기준일 명시 + 환율 변동 고지 (테스트의 '오늘'은 2026-09-29)
+    assert "* Quote currency: USD / Exchange rate as of 2026-09-29 (rate on the actual sailing date applies)." in text
+    assert "exchange rate fluctuation within validity" in text
+    assert "* Destination charges are for consignee's account." in text  # CIF 수출 견적 고지
+
+
+def test_quote_language_can_be_korean(client, connect, monkeypatch):
+    """QUOTE_LANGUAGE=ko 이면 발주 측 예시 견적서의 한글 문구를 쓴다."""
+    monkeypatch.setattr(settings, "quote_language", "ko")
+    case_id = create(client, text_mail(FULL_LCL))["caseId"]
+    ws = load_workbook(settings.storage_dir / case_id / "quotes" / f"{case_id}_견적서.xlsx").active
+    assert ws["B10"].value == "발 신 : 레오나 해운항공㈜ / 견적 담당 드림" and "해상 수출 운임 제안서" in ws["B12"].value
+    assert ws["C19"].value.endswith("(1 R/T 기준)") and ws["F29"].value == "INV.V x 1/1,000 (MIN 기준)"
+    assert ws["B48"].value == "* 감사합니다." and ws["B9"].value == "수 신 : buyer@abc-trading.example.com"
+    assert "* 도착지 비용 수하인 부담" in [ws[f"B{r}"].value for r in range(39, 48)]
+    assert ws["B39"].value == "* 견적 통화 USD · 환율 기준일 2026-09-29 (실제 출항일 환율 적용)"
+    assert any((ws[f"B{r}"].value or "").startswith("* VALIDITY : 2026년") for r in range(39, 48))
 
 
 def test_multi_item_sample_is_held_without_mixed_values(client, connect):
@@ -222,6 +258,34 @@ def test_supplement_draft_uses_validation_questions_when_empty(client, connect):
     assert draft["htmlBody"].count("<li>") == len(expected) > 0  # FR-305: 문항 = 검증 결과
     edited = client.post(f"/api/cases/{case['caseId']}/drafts/supplement", json={"questions": ["직접 쓴 문항"]}).json()
     assert edited["htmlBody"].count("<li>") == 1  # 담당자가 고친 문항이 있으면 그것을 쓴다
+
+
+def test_supplement_draft_reports_question_mismatch(client, connect):
+    """FR-305: 초안 문항이 검증 결과와 같은지 확인해 돌려주고 이력에 남긴다 (담당자 수정은 막지 않는다)."""
+    case = create(client, eml("01_lcl_request.eml"))
+    expected = case["extraction"]["validation"]["questions"]
+    assert case["extraction"]["validation"]["questionCount"] == len(expected) >= 2
+    url = f"/api/cases/{case['caseId']}/drafts/supplement"
+    same = client.post(url, json={"questions": []}).json()
+    assert same["questionCheck"] == {"matches": True, "expected": len(expected), "actual": len(expected),
+                                     "added": [], "missing": []}
+    edited = client.post(url, json={"questions": [expected[0], "직접 쓴 문항"]}).json()
+    check = edited["questionCheck"]
+    assert check["matches"] is False and check["added"] == ["직접 쓴 문항"] and check["missing"] == expected[1:]
+    events = client.get(f"/api/cases/{case['caseId']}").json()["events"]
+    assert events[-1]["detail"]["questionCheck"]["matches"] is False
+
+
+def test_issues_have_severity(client, connect):
+    """FR-301: 문제마다 심각도(Block/Warn/Info)가 붙고, 누락은 Block이다."""
+    validation_result = create(client, eml("01_lcl_request.eml"))["extraction"]["validation"]
+    issues = validation_result["issues"]
+    assert issues and all(i["severity"] in ("Block", "Warn", "Info") for i in issues)
+    missing = [i for i in issues if i["code"] == "MISSING"]
+    assert missing and all(i["severity"] == "Block" for i in missing)
+    # 정의서 2장: Block = 견적 산출 불가. 화주 문항이 있으면 견적을 만들지 않으므로 전부 Block이어야 한다
+    assert all(i["severity"] == "Block" for i in issues if i["question"])
+    assert sum(validation_result["severityCount"].values()) == len(issues) + len(validation_result["hold"])
 
 
 def test_draft_recipient_uses_extracted_contact(client, connect):
@@ -342,19 +406,49 @@ def test_quote_pdf_is_made_with_libreoffice(client, connect, monkeypatch):
     assert sorted(a["filename"] for a in draft["attachments"]) == sorted([pdf.name, f"{case['caseId']}_견적서.xlsx"])
 
 
-def test_quote_without_libreoffice_still_makes_xlsx(client, connect, monkeypatch):
+def test_quote_generation_time_is_recorded_within_10_seconds(client, connect, monkeypatch):
+    """NFR-02: 견적서 생성 10초 이내 — XLSX와 PDF(내장 엔진)까지 만든 시간을 재서 검증 결과에 남긴다."""
+    from app import quotation
+
+    monkeypatch.setattr(settings, "quote_pdf", True)
+    monkeypatch.setattr(quotation, "find_soffice", lambda: None)
+    quote = create(client, text_mail(FULL_LCL))["extraction"]["validation"]["quote"]
+    assert quote["pdf"] and isinstance(quote["elapsedMs"], int)
+    assert 0 <= quote["elapsedMs"] <= 10_000 and quote["withinLimit"] is True
+
+
+def test_quote_without_libreoffice_uses_builtin_pdf(client, connect, monkeypatch):
+    """LibreOffice가 없어도 XLSX와 PDF(내장 엔진)가 함께 만들어진다 (MUST-SHIP ④)."""
     from app import quotation
 
     monkeypatch.setattr(settings, "quote_pdf", True)
     monkeypatch.setattr(quotation, "find_soffice", lambda: None)
     case = create(client, text_mail(FULL_LCL))
     quote = case["extraction"]["validation"]["quote"]
-    assert quote["pdf"] is None and "LibreOffice" in quote["pdfNote"] and case["status"] == "계산완료"
+    assert case["status"] == "계산완료" and quote["file"].endswith(".xlsx")
+    assert quote["pdf"] and quote["pdf"].endswith(".pdf")
+    assert "LibreOffice" in quote["pdfNote"] and "내장 엔진" in quote["pdfNote"]
+    assert (settings.storage_dir / quote["pdf"]).exists()
+
+
+def test_quote_still_makes_xlsx_if_pdf_fails(client, connect, monkeypatch):
+    """PDF를 어떤 방법으로도 못 만들어도 견적은 XLSX로 완료된다 (기존 동작 유지)."""
+    from app import quotation, quote_pdf
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("pdf engine down")
+
+    monkeypatch.setattr(settings, "quote_pdf", True)
+    monkeypatch.setattr(quotation, "find_soffice", lambda: None)
+    monkeypatch.setattr(quote_pdf, "render_pdf", broken)
+    case = create(client, text_mail(FULL_LCL))
+    quote = case["extraction"]["validation"]["quote"]
+    assert case["status"] == "계산완료" and quote["file"].endswith(".xlsx")
+    assert quote["pdf"] is None and "XLSX만 생성" in quote["pdfNote"]
 
 
 @pytest.mark.parametrize("container,reason", [
     ("20FT GP", "국내 부대비용"),  # 해상운임은 있지만 20ft 부대비용 자료 없음 → 불완전 견적 금지
-    ("40' REEFER", "국내 부대비용"),
 ])
 def test_container_without_local_charges_is_held(client, connect, container, reason):
     case = create(client, text_mail(FCL_SG.replace("40HQ 1대", container).replace("48CBM", "25CBM")
@@ -363,10 +457,13 @@ def test_container_without_local_charges_is_held(client, connect, container, rea
     assert case["status"] == "보류" and reason in hold[0]["message"]
 
 
-def test_reefer_not_served_port_is_held(client, connect):
-    body = FCL_SG.replace("40HQ 1대", "40RF 1대").replace("싱가포르", "제벨알리")  # 표에서 '-' (취급 안 함)
-    case = create(client, text_mail(body))
-    assert case["status"] == "보류" and "요율" in case["extraction"]["validation"]["hold"][0]["message"]
+@pytest.mark.parametrize("container,port", [("40RF 1대", "싱가포르"), ("40' REEFER", "싱가포르"), ("40RF 1대", "제벨알리")])
+def test_reefer_container_is_held_for_staff(client, connect, container, port):
+    """냉동 컨테이너 요청은 요율이 있든 없든 자동 견적하지 않고 담당자 처리로 넘긴다 (정의서 3장 범위 제외, FR-308)."""
+    case = create(client, text_mail(FCL_SG.replace("40HQ 1대", container).replace("싱가포르", port)))
+    hold = case["extraction"]["validation"]["hold"]
+    assert case["status"] == "보류" and hold[0]["code"] == "SPECIAL_CARGO" and "40RF" in hold[0]["message"]
+    assert case["extraction"]["validation"]["quote"] is None
 
 
 # ------------------------------------------------------------------ 컨테이너 대수 (금액이 대수만큼 늘어야 한다)
@@ -387,7 +484,8 @@ def test_missing_count_is_estimated_from_volume_and_explained(client, connect):
     quote = case["extraction"]["validation"]["quote"]
     assert quote["containerCount"] == 2 and "100CBM" in quote["containerCountNote"]  # 76CBM×0.88 넘음 → 2대
     ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
-    assert any("40HQ 2대로 산정" in (ws[f"B{r}"].value or "") for r in range(39, 48))
+    assert any("Container q'ty : 2 x 40HQ (estimated from cargo 100CBM / 20,000KG)" in (ws[f"B{r}"].value or "")
+               for r in range(39, 48))
 
 
 @pytest.mark.parametrize("stated,asked", [("1대", True), ("2대", False)])
@@ -396,6 +494,30 @@ def test_over_weight_uses_weight_per_container(client, connect, stated, asked):
     case = create(client, text_mail(body))
     codes = {i["code"] for i in case["extraction"]["validation"]["issues"]}
     assert ("OVER_WEIGHT" in codes) is asked
+
+
+def test_over_volume_with_stated_count(client, connect):
+    """FR-302: 적힌 대수로 실을 수 없는 부피면 묻는다 (40HQ 1대 = 76CBM)."""
+    case = create(client, text_mail(FCL_SG.replace("48CBM", "90CBM")))
+    codes = {i["code"] for i in case["extraction"]["validation"]["issues"]}
+    assert "OVER_VOLUME" in codes and case["status"] == "정보부족"
+    fits = create(client, text_mail(FCL_SG.replace("48CBM", "90CBM").replace("40HQ 1대", "40HQ 2대")))
+    assert "OVER_VOLUME" not in {i["code"] for i in fits["extraction"]["validation"]["issues"]}
+
+
+def test_container_without_weight_limit_is_info_only(client, connect):
+    """허용중량 자료가 없는 컨테이너(40RF)는 검사를 못 했다고 담당자에게만 알린다 (화주 문항 아님)."""
+    case = create(client, text_mail(FCL_SG.replace("40HQ 1대", "40RF 1대")))
+    note = [i for i in case["extraction"]["validation"]["issues"] if i["code"] == "NO_WEIGHT_LIMIT"]
+    assert note and note[0]["severity"] == "Info" and note[0]["question"] is None
+
+
+@pytest.mark.parametrize("commodity,held", [("냉동 만두", True), ("스프링노트", False)])
+def test_special_cargo_is_held(client, connect, commodity, held):
+    """FR-308: 냉동·특수화물 키워드가 있으면 자동 견적을 멈추고 담당자 처리로 넘긴다."""
+    case = create(client, text_mail(FULL_LCL.replace("스프링노트", commodity)))
+    codes = [h["code"] for h in case["extraction"]["validation"]["hold"]]
+    assert ("SPECIAL_CARGO" in codes) is held and (case["status"] == "보류") is held
 
 
 def test_validation_rules_are_data(client, connect, monkeypatch):
@@ -643,44 +765,186 @@ def client_rates(client, connect):
     assert res.status_code == 200 and res.json()["rates"] == 35, res.json()
 
 
-def test_client_lookup_example_is_reproduced(client, client_rates):
-    """발주 측 '조회예시' 시트: CNSHA→KRPUS 20GP×1, CIF, HMM, 선적일 10/05, 화물가액 15,000 → TOTAL USD 890."""
-    case = create(client, text_mail(CLIENT_CASE.format(carrier="선사: HMM\n")))
+# 인코텀즈별 비용 (발주 측 회신 2026-10-06): 수출자 기준 EXW 전부 제외 / FOB 출발지만 / CIF 출발지+해상운임+보험 / DDP 전부.
+# 수입자는 그 반대. 이 요율표는 중국·베트남·태국 → 부산·인천이라 화주가 수입자다 (도착항이 국내).
+# 단, 수입 CIF는 요율표 '조회예시' 시트대로 전부 넣는다.
+# 금액: 해상운임 HMM 450·SITC 430, OTHC 120, DTHC 130, DOC 30, B/L 30, 취급 50, BAF(출발지) 50
+
+
+def test_client_import_fob_has_freight_and_destination(client, client_rates):
+    """수입 FOB: 해상운임 + 도착지 비용 (출발지 비용·보험은 수출자 몫). 선사·스케줄·근거 행은 '조회예시' 시트와 같다."""
+    case = create(client, text_mail(CLIENT_CASE.format(carrier="선사: HMM\n").replace("조건: CIF", "조건: FOB")))
     quote = case["extraction"]["validation"]["quote"]
     assert case["status"] == "계산완료", case["extraction"]["validation"]
-    assert quote["totals"] == {"USD": 890.0} and quote["carrier"] == "HMM"
+    assert quote["tradeRole"] == "IMPORT" and quote["carrier"] == "HMM"
+    assert quote["totals"] == {"USD": 690.0}  # 450 + DTHC 130 + DOC 30 + B/L 30 + 취급 50
     assert (quote["etd"], quote["eta"]) == ("2026-10-06", "2026-10-08")  # 조회예시 스케줄
     lines = {line["charge"]: (line["amount"], line["source"]) for line in quote["lines"]}
     assert lines["OCEAN FREIGHT"] == (450.0, "OceanFreight#1")  # 근거 행까지 예시와 같다
-    assert lines["CARGO INSURANCE"][0] == 30.0  # 15,000 × 0.2% = 30 (최저 30)
+    assert not {"ORIGIN THC", "BUNKER SURCHARGE", "CARGO INSURANCE"} & set(lines)
     fields = {f["field"]: f for f in client.get(f"/api/cases/{case['caseId']}/fields").json()}
     detail = client.get(f"/api/cases/{case['caseId']}").json()
     ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
     remarks = [ws[f"B{r}"].value or "" for r in range(39, 48)]
     assert any("ETD / ETA : 2026-10-06 / 2026-10-08 (HMM)" in r for r in remarks)
-    assert any("FREE TIME : DET 7일 / DEM 7일" in r for r in remarks)
+    assert any("FREE TIME : DET 7 days / DEM 7 days" in r for r in remarks)
+    assert "* Destination charges are for consignee's account." in remarks  # FOB·CIF 견적서 고지
     assert fields["pol"]["value"] == "CNSHA" and detail["status"] == "계산완료"
+    # 수입 FOB 견적서에는 도착항까지 적는다 (POL만 적는 양식은 수출 FOB 전용)
+    assert ws["B17"].value != "** POL" and "BUSAN" in ws["C17"].value.upper() and " - " in ws["C17"].value
+    assert quote["scheduleUnconfirmed"] is False
 
 
 def test_client_rates_lowest_carrier_when_not_specified(client, client_rates):
-    case = create(client, text_mail(CLIENT_CASE.format(carrier="")))
+    case = create(client, text_mail(CLIENT_CASE.format(carrier="").replace("조건: CIF", "조건: FOB")))
     quote = case["extraction"]["validation"]["quote"]
-    assert quote["carrier"] == "SITC" and quote["totals"] == {"USD": 870.0}  # 선사 미지정 → 최저가 SITC 430
+    assert quote["carrier"] == "SITC" and quote["totals"] == {"USD": 670.0}  # 선사 미지정 → 최저가 SITC 430
     assert (quote["etd"], quote["eta"]) == ("2026-10-07", "2026-10-09")
 
 
 def test_client_rates_follow_cargo_ready_date(client, client_rates):
     """GRI 인상: 선적일이 10/16 이후면 후반기 행(HMM 520)을 쓴다 — '오늘'이 아니라 선적일 기준."""
-    case = create(client, text_mail(CLIENT_CASE.format(carrier="선사: HMM\n").replace("2026-10-05", "2026-10-20")))
+    body = CLIENT_CASE.format(carrier="선사: HMM\n").replace("조건: CIF", "조건: FOB").replace("2026-10-05", "2026-10-20")
+    quote = create(client, text_mail(body))["extraction"]["validation"]["quote"]
+    assert quote["rateDate"] == "2026-10-20" and quote["totals"] == {"USD": 760.0}  # 690 - 450 + 520
+
+
+def test_client_import_cif_follows_lookup_example(client, client_rates):
+    """수입 CIF는 발주 측 '조회예시' 시트대로 출발지·해상운임·도착지·보험을 전부 넣는다 (CNSHA→KRPUS 20GP, HMM).
+
+    예시 합계는 890이지만 보험료를 계약금액 × 110% × 0.2% = 33으로 계산해(발주 측 회신 2026-10-06) 893이 된다.
+    """
+    case = create(client, text_mail(CLIENT_CASE.format(carrier="선사: HMM\n")))
     quote = case["extraction"]["validation"]["quote"]
-    assert quote["rateDate"] == "2026-10-20" and quote["totals"] == {"USD": 960.0}  # 890 - 450 + 520
+    assert case["status"] == "계산완료", case["extraction"]["validation"]
+    lines = {line["charge"]: line["amount"] for line in quote["lines"]}
+    assert lines == {"OCEAN FREIGHT": 450.0, "ORIGIN THC": 120.0, "DESTINATION THC": 130.0, "DOCUMENTATION FEE": 30.0,
+                     "B/L FEE": 30.0, "HANDLING CHARGE": 50.0, "CARGO INSURANCE": 33.0, "BUNKER SURCHARGE": 50.0}
+    assert quote["totals"] == {"USD": 893.0} and quote["carrier"] == "HMM"
+    assert (quote["etd"], quote["eta"]) == ("2026-10-06", "2026-10-08")  # 조회예시 스케줄
 
 
-def test_client_rates_fob_excludes_freight_and_destination(client, client_rates):
-    case = create(client, text_mail(CLIENT_CASE.format(carrier="").replace("조건: CIF", "조건: FOB")))
-    lines = {line["charge"] for line in case["extraction"]["validation"]["quote"]["lines"]}
-    assert "OCEAN FREIGHT" not in lines and "DESTINATION THC" not in lines and "CARGO INSURANCE" not in lines
-    assert case["extraction"]["validation"]["quote"]["totals"] == {"USD": 280.0}  # OTHC 120 + DOC 30 + BL 30 + 취급 50 + BAF 50
+def test_client_import_exw_has_everything(client, client_rates):
+    """수입 EXW: 수출자가 아무것도 내지 않는다 → 출발지·해상운임·도착지 전부 (보험은 요율표가 CIF에만 부과)."""
+    body = CLIENT_CASE.format(carrier="선사: HMM\n").replace("조건: CIF", "조건: EXW")
+    quote = create(client, text_mail(body))["extraction"]["validation"]["quote"]
+    lines = {line["charge"] for line in quote["lines"]}
+    assert {"OCEAN FREIGHT", "ORIGIN THC", "DESTINATION THC", "BUNKER SURCHARGE"} <= lines
+    assert quote["totals"] == {"USD": 860.0}  # 450 + 120 + 130 + 30 + 30 + 50 + BAF 50
+
+
+def test_nothing_to_quote_is_held(client, client_rates):
+    """수입 DDP·수출 EXW: 상대방이 전부 부담해 견적에 넣을 비용이 없다 → 견적서를 만들지 않고 담당자에게 넘긴다."""
+    ddp = create(client, text_mail(CLIENT_CASE.format(carrier="").replace("조건: CIF", "조건: DDP")))
+    hold = ddp["extraction"]["validation"]["hold"]
+    assert ddp["status"] == "보류" and "DDP 조건의 수입자" in hold[0]["message"]
+    exw = create(client, text_mail(FULL_LCL.replace("조건: CIF", "조건: EXW")))  # 인천 → 시드니 = 수출
+    hold = exw["extraction"]["validation"]["hold"]
+    assert exw["status"] == "보류" and "EXW 조건의 수출자" in hold[0]["message"]
+
+
+def test_two_rate_tables_do_not_double_charge(client, client_rates):
+    """요율표가 두 벌(테스트 요율 + 발주 측 요율표) 올라와 있어도 한 견적에 서류비·보험료가 두 번 들어가지 않는다.
+
+    인천→시드니 LCL은 테스트 요율에만 있다 → 발주 측 요율표의 공통(ALL) 서류비·B/L·취급료·보험은 붙지 않는다.
+    """
+    quote = create(client, text_mail(FULL_LCL))["extraction"]["validation"]["quote"]
+    lines = [line["charge"] for line in quote["lines"]]
+    assert quote["totals"] == {"USD": 500.0, "KRW": 140203.0}
+    assert not {"DOCUMENTATION FEE", "B/L FEE", "HANDLING CHARGE", "CARGO INSURANCE"} & set(lines)
+    assert lines.count("DOCUMENT FEE") == 1 and lines.count("INSURANCE FEE") == 1
+
+
+def test_quote_date_is_korean_time():
+    """견적서 DATE는 한국 시각 기준 — DB의 UTC 시각을 그대로 찍으면 오전 9시 전에는 하루 전 날짜가 된다."""
+    from datetime import datetime, timezone
+
+    from app import quotation as q
+
+    assert f"{q.kst(datetime(2026, 10, 6, 23, 30)):%Y. %m. %d}" == "2026. 10. 07"  # UTC 23:30 = 한국 08:30 다음 날
+    assert f"{q.kst(datetime(2026, 10, 7, 3, 0, tzinfo=timezone.utc)):%Y. %m. %d}" == "2026. 10. 07"
+
+
+def test_rate_table_memo_is_not_printed_on_quote():
+    """발주 측 요율표의 remark(내부 메모)는 영문이든 한글이든 견적서 REMARK 칸에 찍지 않는다."""
+    from types import SimpleNamespace as NS
+
+    from app import quotation as q
+
+    memo_en = NS(basis="PER_CNTR", remark="GRI increase; separate validity period (previous rate retained)",
+                 source_ref="OceanFreight#5")
+    memo_ko = NS(basis="PER_BL", remark="건당 1회", source_ref="Surcharges#11행 DOC")
+    for lang in ("en", "ko"):
+        assert q.item_remark(memo_en, lang) == "PER CNTR" and q.item_remark(memo_ko, lang) == "PER B/L"
+    # 시스템이 만든 보험 산정식과, 우리 양식으로 올린 요율의 비고(견적서용 문구)는 그대로 찍는다
+    insurance = NS(basis="PERCENT", remark="INV.V x 110% x 0.2% (MIN USD 30)", source_ref="Surcharges#14행 INS")
+    ours = NS(basis="PER_CNTR", remark="PER CNTR · INCLUSIVE ISPS(DIRECT)", source_ref=None)
+    assert q.item_remark(insurance, "en") == "INV.V x 110% x 0.2% (MIN USD 30)"
+    assert q.item_remark(ours, "en") == "PER CNTR · INCLUSIVE ISPS(DIRECT)"
+
+
+@pytest.mark.parametrize("lang", ["en", "ko"])
+def test_gri_rate_memo_stays_off_the_quote(client, client_rates, monkeypatch, lang):
+    """10/16 이후 HMM 운임 행의 비고는 'GRI 인상 → … (이전 행 보존)'이라는 내부 메모다 — 견적서에는 PER CNTR만."""
+    monkeypatch.setattr(settings, "quote_language", lang)
+    body = CLIENT_CASE.format(carrier="선사: HMM\n").replace("2026-10-05", "2026-10-20")
+    case = create(client, text_mail(body))
+    assert case["extraction"]["validation"]["quote"]["lines"][0]["source"] == "OceanFreight#5"  # GRI 인상 행
+    ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
+    remarks = [ws[f"F{r}"].value or "" for r in range(23, 35)]
+    assert remarks[0] == "PER CNTR"
+    assert not any(word in r for r in remarks for word in ("GRI", "예시", "건당", "취급료", "최저가"))
+
+
+def test_incoterm_rule_table():
+    """수출자 기준 규칙과 수입자(반대) — DB 없이 규칙 표만 확인."""
+    from types import SimpleNamespace as NS
+
+    from app import quotation as q
+
+    assert q.trade_role(NS(pol="KRPUS", pod="SGSIN")) == "EXPORT" and q.trade_role(NS(pol="CNSHA", pod="KRPUS")) == "IMPORT"
+    assert q.trade_role(NS(pol="CNSHA", pod="SGSIN")) is None
+    assert q.included_parts("EXW", "EXPORT") == set() and q.included_parts("FOB", "EXPORT") == {"ORIGIN"}
+    assert q.included_parts("CIF", "EXPORT") == {"ORIGIN", "FREIGHT", "INSURANCE"}
+    assert q.included_parts("DDP", "EXPORT") == {"ORIGIN", "FREIGHT", "INSURANCE", "DEST"}
+    assert q.included_parts("FOB", "IMPORT") == {"FREIGHT", "INSURANCE", "DEST"} and q.included_parts("DDP", "IMPORT") == set()
+    assert q.included_parts("EXW", "IMPORT") == q.included_parts("CIF", "IMPORT") == {"ORIGIN", "FREIGHT", "INSURANCE", "DEST"}
+    assert q.incoterm_remarks("DDP", "en") == ["* Customs duty and VAT are not included and will be charged separately."]
+    assert q.incoterm_remarks("DDP", "ko") == ["* 관세·부가세 별도"] and q.incoterm_remarks("EXW", "en") == []
+    assert q.incoterm_remarks("CIF", "ko") == ["* 도착지 비용 수하인 부담"]
+
+
+def test_insurance_is_110_percent_of_invoice_value():
+    """보험료 = 계약금액 × 110% × 보험요율, 최저 금액 적용 (발주 측 회신 2026-10-06)."""
+    from types import SimpleNamespace as NS
+
+    from app import quotation as q
+
+    ins = NS(charge_code="INS", rate_pct=0.002, min_amount=30, currency="USD")
+    assert q.percent_amount(ins, NS(invoiceValue=15000, ccy="USD")) == (33.0, "INV.V x 110% x 0.2% (MIN USD 30)")
+    assert q.percent_amount(ins, NS(invoiceValue=10000, ccy="USD"))[0] == 30.0  # 22 → 최저 30
+    other = NS(charge_code="HANDLING", rate_pct=0.01, min_amount=None, currency="USD")
+    assert q.percent_amount(other, NS(invoiceValue=1000, ccy="USD")) == (10.0, "INV.V x 1%")  # 보험이 아니면 110% 없음
+
+
+def test_validity_stops_at_rate_end_date(client, client_rates, monkeypatch):
+    """유효기간 = 발행일 + 14일, 견적에 쓴 요율의 종료일이 더 빠르면 그날까지 (HMM 전반기 운임은 10/15까지)."""
+    monkeypatch.setattr(validation, "today_kst", lambda: date(2026, 10, 10))
+    body = CLIENT_CASE.format(carrier="선사: HMM\n").replace("조건: CIF", "조건: FOB").replace("2026-10-05", "2026-10-12")
+    quote = create(client, text_mail(body))["extraction"]["validation"]["quote"]
+    assert quote["validUntil"] == "2026-10-15"  # 10/10 + 14일 = 10/24 이지만 요율이 10/15에 끝난다
+
+
+@pytest.mark.parametrize("days,valid_until", [(14, "2026-10-13"), (7, "2026-10-06"), (1, "2026-09-30"),
+                                              (30, "2026-10-13"), (0, "2026-09-30")])
+def test_quote_validity_days_is_selectable(client, client_rates, monkeypatch, days, valid_until):
+    """FR-507: 견적 유효기간은 설정(QUOTE_VALIDITY_DAYS)으로 1~14일 중에서 고른다. 범위를 벗어나면 1 또는 14."""
+    monkeypatch.setattr(settings, "quote_validity_days", days)
+    case = create(client, text_mail(CLIENT_CASE.format(carrier="")))
+    quote = case["extraction"]["validation"]["quote"]
+    assert quote["validUntil"] == valid_until  # 테스트의 '오늘'은 2026-09-29
+    ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
+    assert any(f"* VALIDITY : {valid_until}" == (ws[f"B{r}"].value or "") for r in range(39, 48))
 
 
 def test_client_rates_bad_file_changes_nothing(client, client_rates):
@@ -695,3 +959,135 @@ def test_client_rates_bad_file_changes_nothing(client, client_rates):
     res = client.post("/api/rates/import", files={"file": ("bad.xlsx", buf.getvalue(), "application/octet-stream")})
     assert res.status_code == 400 and any("OceanFreight 5행 pod" in e for e in res.json()["detail"]["errors"])
     assert client.get("/api/rates/summary").json()  # 기존 요율은 그대로
+
+
+# ------------------------------------------------------------------ 옛 견적서 정리 · 0 이하 값 차단
+
+
+def quote_folder(case_id: str, name: str = "quotes") -> list[str]:
+    folder = settings.storage_dir / case_id / name
+    return sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []
+
+
+def test_old_quote_is_not_attached_when_no_new_quote(client, connect, session):
+    """견적서를 낸 뒤 조건이 바뀌어 보류·정보부족이 되면, 옛 견적서는 송부 초안에 붙지 않는다."""
+    from app import services
+
+    case_id = create(client, text_mail(FULL_LCL))["caseId"]
+    assert quote_folder(case_id) == [f"{case_id}_견적서.xlsx"]
+    case = services.get_case(session, case_id)
+    pod, case.quote_input.pod = case.quote_input.pod, "USNYC"  # 요율이 없는 구간으로 바뀜
+    result = RuleValidator().validate(session, case, {})
+    assert result["status"] == "보류" and result["quoteRetired"] == [f"{case_id}_견적서_v1.xlsx"]
+    assert quote_folder(case_id) == [] and quote_folder(case_id, "quote-history") == [f"{case_id}_견적서_v1.xlsx"]
+
+    case.quote_input.pod, case.quote_input.incoterms = pod, None  # 요율은 있지만 필수 항목이 빠짐
+    assert RuleValidator().validate(session, case, {})["status"] == "정보부족" and quote_folder(case_id) == []
+
+
+def test_pdf_and_xlsx_are_always_the_same_version(client, connect, session, monkeypatch):
+    """새 판에서 PDF를 못 만들어도 옛 PDF가 남아 새 XLSX와 섞이지 않는다."""
+    from app import quotation, quote_pdf, services
+
+    monkeypatch.setattr(settings, "quote_pdf", True)
+    monkeypatch.setattr(quotation, "find_soffice", lambda: None)
+    case_id = create(client, text_mail(FULL_LCL))["caseId"]
+    assert quote_folder(case_id) == [f"{case_id}_견적서.pdf", f"{case_id}_견적서.xlsx"]
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("pdf engine down")
+
+    monkeypatch.setattr(quote_pdf, "render_pdf", broken)
+    result = RuleValidator().validate(session, services.get_case(session, case_id), {})
+    assert result["quote"]["version"] == 2 and result["quote"]["pdf"] is None
+    assert quote_folder(case_id) == [f"{case_id}_견적서.xlsx"]  # 2판 XLSX만 — 1판 PDF는 없다
+    assert quote_folder(case_id, "quote-history") == [f"{case_id}_견적서_v1.pdf", f"{case_id}_견적서_v1.xlsx"]
+
+
+@pytest.mark.parametrize("field,asked", [
+    ("boxL", "volume"), ("boxW", "volume"), ("boxH", "volume"), ("totalCbm", "volume"),
+    ("grossWeightKg", "grossWeightKg"), ("invoiceValue", "invoiceValue"),
+])
+@pytest.mark.parametrize("value", [0, -5])
+def test_zero_or_negative_values_are_blocked(client, connect, session, field, asked, value):
+    """FR-302: 치수·부피·중량·금액이 0 이하면 견적을 내지 않고 다시 묻는다."""
+    from app import services
+
+    case = services.get_case(session, create(client, text_mail(FULL_LCL))["caseId"])
+    assert not [i for i in validation.check(session, case.quote_input, today=TODAY) if i["code"] == "INVALID"]
+    setattr(case.quote_input, field, value)
+    issues = [i for i in validation.check(session, case.quote_input, today=TODAY) if i["code"] == "INVALID"]
+    assert [(i["field"], i["severity"]) for i in issues] == [(asked, "Block")] and issues[0]["question"]
+    assert RuleValidator().validate(session, case, {})["status"] == "정보부족"
+
+
+def test_all_zero_box_size_is_one_question(client, connect, session):
+    from app import services
+
+    qi = services.get_case(session, create(client, text_mail(FULL_LCL))["caseId"]).quote_input
+    qi.boxL = qi.boxW = qi.boxH = 0
+    assert [i["field"] for i in validation.check(session, qi, today=TODAY) if i["code"] == "INVALID"] == ["volume"]
+
+
+def test_hold_reason_tells_expired_rate_from_unregistered_lane(client, client_rates):
+    """화물 준비일이 요율 유효기간(10/31) 뒤면 '미등록 구간'이 아니라 '그 날짜에 유효한 요율 없음'으로 알린다."""
+    late = create(client, text_mail(CLIENT_CASE.format(carrier="").replace("2026-10-05", "2026-11-20")))
+    message = late["extraction"]["validation"]["hold"][0]["message"]
+    assert late["status"] == "보류" and "2026-11-20 기준으로 유효한 요율이 없습니다" in message and "2026-10-31" in message
+    in_time = create(client, text_mail(CLIENT_CASE.format(carrier="")))  # 유효기간 안이면 그대로 견적
+    assert in_time["status"] == "계산완료"
+
+
+def test_sailing_before_cargo_ready_date_is_not_printed(client, client_rates):
+    """FR-507: 요율표의 출항일(10/06)이 화물 준비일(10/10)보다 이르면 확정 일정처럼 적지 않는다."""
+    body = CLIENT_CASE.format(carrier="선사: HMM\n").replace("조건: CIF", "조건: FOB").replace("2026-10-05", "2026-10-10")
+    case = create(client, text_mail(body))
+    quote = case["extraction"]["validation"]["quote"]
+    assert case["status"] == "계산완료" and quote["totals"] == {"USD": 690.0}
+    assert (quote["etd"], quote["eta"], quote["scheduleUnconfirmed"]) == (None, None, True)
+    ws = load_workbook(settings.storage_dir / case["caseId"] / "quotes" / f"{case['caseId']}_견적서.xlsx").active
+    remarks = [ws[f"B{r}"].value or "" for r in range(39, 48)]
+    assert any("ETD / ETA : to be confirmed (HMM)" in r for r in remarks) and not any("2026-10-06" in r for r in remarks)
+    assert any("QUOTE NO." in r for r in remarks)  # 비고 칸이 넘치지 않는다
+
+
+def test_cif_without_insurance_rate_is_held(client, client_rates, session):
+    """CIF인데 보험 요율이 없으면 보험료가 빠진 견적을 내지 않는다."""
+    from sqlalchemy import delete
+    from app.models import Rate
+
+    session.execute(delete(Rate).where(Rate.charge_code.in_(["INS", "INSURANCE"]), Rate.source == "발주측 요율표"))
+    session.commit()
+    cif = create(client, text_mail(CLIENT_CASE.format(carrier="")))
+    assert cif["status"] == "보류" and "보험료 요율 없음" in cif["extraction"]["validation"]["hold"][0]["message"]
+    fob = create(client, text_mail(CLIENT_CASE.format(carrier="").replace("조건: CIF", "조건: FOB"), subject="FOB 건"))
+    assert fob["status"] == "계산완료"  # 보험이 조건에 없는 FOB는 그대로 견적
+
+
+def test_same_charge_in_two_tables_is_charged_once():
+    """같은 구간·기간의 요율표 두 개에 THC·서류비가 모두 있어도 한 번만 넣는다."""
+    from types import SimpleNamespace as NS
+    from app import quotation as q
+
+    def row(i, code, source):
+        return NS(id=i, charge_code=code, source=source)
+
+    rows = [row(1, "THC", "TEST: 예시"), row(2, "DOC", "TEST: 예시"), row(3, "SEAL", "TEST: 예시"),
+            row(4, "THC", "발주측 요율표"), row(5, "DOC", "발주측 요율표"),
+            row(6, "OCEAN_FREIGHT", "TEST: 예시"), row(7, "OCEAN_FREIGHT", "발주측 요율표")]
+    assert [r.id for r in q.one_table_per_charge(rows)] == [3, 4, 5, 6, 7]  # 실제 요율표 우선, 한쪽에만 있는 비용은 유지
+    two_real = [row(1, "THC", "요율표 A"), row(2, "THC", "요율표 B")]
+    assert [r.id for r in q.one_table_per_charge(two_real)] == [2]  # 둘 다 실제 요율표면 나중에 올린 것
+
+
+def test_review_value_is_not_used_as_confirmed(client, connect, session):
+    """이전 메일의 값이 남아 있어도, 최신 추출이 그 항목을 '확인 필요'로 보면 견적하지 않고 다시 묻는다."""
+    from app import services
+
+    case = services.get_case(session, create(client, text_mail(FULL_LCL))["caseId"])
+    doubt = {"fields": {"grossWeightKg": {"status": "review", "value": None, "evidence": "총중량은 확인 후 다시 알려드리겠습니다"}}}
+    result = RuleValidator().validate(session, case, doubt)
+    issue = next(i for i in result["issues"] if i["field"] == "grossWeightKg")
+    assert result["status"] == "정보부족" and issue["code"] == "REVIEW" and "확인 후 다시" in issue["question"]
+    fixed = RuleValidator().validate(session, case, {**doubt, "lockedByManual": ["grossWeightKg"]})
+    assert fixed["status"] == "계산완료"  # 담당자가 직접 고친 값은 확정값

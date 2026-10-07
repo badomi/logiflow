@@ -4,6 +4,7 @@
     GET /api/health/detail             서버가 켜져 있을 때
 """
 
+import importlib.util
 import json
 import urllib.request
 
@@ -66,8 +67,10 @@ def collect(session: Session) -> dict:
             warnings.append(f"적용 기간이 끝난 요율이 있습니다: {s['source']} (~{s['validUntil']}) — 새 운임표를 올리세요")
 
     soffice = quotation.find_soffice() if settings.quote_pdf else None
-    if settings.quote_pdf and soffice is None:
-        warnings.append("LibreOffice가 없어 견적서 PDF를 만들지 않습니다 (XLSX만). 설치: https://www.libreoffice.org")
+    builtin = importlib.util.find_spec("reportlab") is not None  # 내장 엔진(quote_pdf.py)
+    if settings.quote_pdf and soffice is None and not builtin:
+        warnings.append("LibreOffice도 reportlab도 없어 견적서 PDF를 만들지 못합니다 (XLSX만). "
+                        "pip install -r requirements.txt 로 reportlab을 설치하세요")
     if not settings.quote_template.exists():
         warnings.append(f"견적서 양식 파일이 없습니다: {settings.quote_template}")
 
@@ -79,7 +82,7 @@ def collect(session: Session) -> dict:
         "llm": llm,
         "rates": {"count": rate_count, "sources": sources},
         "containers": list(session.scalars(select(ContainerType.code))),
-        "pdf": {"enabled": settings.quote_pdf, "soffice": soffice},
+        "pdf": {"enabled": settings.quote_pdf, "soffice": soffice, "builtin": builtin},
         "quoteTemplate": str(settings.quote_template),
         "database": settings.database_url.split("@")[-1],  # 비밀번호가 있으면 가린다
         "dictionaryVersion": dictionary().get("version"),
@@ -104,7 +107,7 @@ def main() -> None:
         print(f"  LLM            : {l['model']} @ {l['url']} — 연결 {'O' if l['reachable'] else 'X'}, "
               f"모델 설치 {'O' if l['modelInstalled'] else 'X'}")
     print(f"  요율           : {info['rates']['count']}개 ({len(info['rates']['sources'])}개 출처)")
-    print(f"  견적서 PDF     : {info['pdf']['soffice'] or '만들지 않음 (LibreOffice 없음)'}")
+    print(f"  견적서 PDF     : {info['pdf']['soffice'] or ('내장 엔진 (reportlab)' if info['pdf']['builtin'] else '만들지 않음')}")
     print(f"  DB             : {info['database']}")
     print()
     if info["ok"]:

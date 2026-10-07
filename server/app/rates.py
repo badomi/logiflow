@@ -15,6 +15,7 @@ API: GET /api/rates/template · GET /api/rates/export · POST /api/rates/import 
 
 import argparse
 import io
+import math
 import sys
 from datetime import date, datetime
 
@@ -30,12 +31,17 @@ from .models import ContainerType, LaneRule, Rate
 RATE_SHEET, LANE_SHEET, GUIDE_SHEET = "요율", "구간룰", "작성 안내"
 RATE_COLUMNS = ["구분코드", "견적서 표기", "선적항(POL)", "도착항(POD)", "컨테이너", "인코텀즈", "기준", "단가", "통화",
                 "비고", "적용 시작", "적용 종료", "출처"]
+RATE_EXTRA_COLUMNS = ["선사", "비용 방향", "보험요율", "최저금액", "출항일", "도착일", "운송일수",
+                      "DEM 프리타임", "DET 프리타임", "원본 행", "정렬순서"]
 LANE_COLUMNS = ["선적항(POL)", "도착항(POD)", "컨테이너", "견적 통화", "운송일수", "DET 프리타임", "DEM 프리타임", "견적 유효일수"]
 
 BASIS_IN = {"R/T": "PER_RT", "RT": "PER_RT", "CBM": "PER_RT", "CNTR": "PER_CNTR", "컨테이너": "PER_CNTR",
             "B/L": "PER_BL", "BL": "PER_BL", "건": "PER_BL", "TRIP": "PER_TRIP", "운행": "PER_TRIP",
-            "AT COST": "AT_COST", "ATCOST": "AT_COST", "실비": "AT_COST"}
-BASIS_OUT = {"PER_RT": "R/T", "PER_CNTR": "CNTR", "PER_BL": "B/L", "PER_TRIP": "TRIP", "AT_COST": "AT COST"}
+            "AT COST": "AT_COST", "ATCOST": "AT_COST", "실비": "AT_COST",
+            "PERCENT": "PERCENT", "PERCENT_OF_VALUE": "PERCENT", "SHIPMENT": "PER_SHIPMENT",
+            "PER_SHIPMENT": "PER_SHIPMENT"}
+BASIS_OUT = {"PER_RT": "R/T", "PER_CNTR": "CNTR", "PER_BL": "B/L", "PER_TRIP": "TRIP", "AT_COST": "AT COST",
+             "PERCENT": "PERCENT", "PER_SHIPMENT": "SHIPMENT"}
 KNOWN_CODES = {
     "OCEAN_FREIGHT": "해상운임 (CIF·DDP·EXW 견적에 필수)", "THC": "출발지 터미널 비용 (없으면 부대비용 요율 없음으로 보류)",
     "CFS": "CFS 창고료", "WFG": "부두사용료(Wharfage)", "SHUTTLE": "셔틀 비용", "DOC_FEE": "서류 발급비",
@@ -82,10 +88,13 @@ def _guide(wb: Workbook) -> None:
         ["선적항·도착항", "UN/LOCODE(KRPUS) 또는 항구 이름(부산, SINGAPORE). 비우면 '모든 항구'"],
         ["컨테이너", "LCL / 20FT GP / 40FT GP / 40HQ / 40RF. 비우면 '모든 컨테이너'"],
         ["인코텀즈", "FOB / CIF / DDP / EXW. 비우면 '모든 조건'. 해상운임은 보통 CIF로 둔다 (FOB는 매수인 부담)"],
-        ["기준", "R/T(LCL, 부피·중량 톤) / CNTR(컨테이너당) / B/L(건당) / TRIP(운행당) / AT COST(실비, 단가 비움)"],
+        ["기준", "R/T(LCL) / CNTR(컨테이너당) / B/L(건당) / TRIP(운행당) / SHIPMENT(선적당) / PERCENT(가액 비율) / AT COST(실비)"],
         ["단가·통화", "숫자만 (쉼표 가능). 통화는 USD·KRW 등 3자리, 비우면 KRW"],
         ["적용 시작·종료", "YYYY-MM-DD. 비우면 기간 제한 없음. 월간 운임은 그 달 1일~말일로 적는다"],
         ["출처", "예: 2026-10 D선사 월간운임. 같은 출처로 다시 올리면 그 출처 요율만 통째로 바뀐다"],
+        ["내보내기 추가 칸", "선사·비용 방향·보험요율·최저금액·일정·프리타임·원본 행·정렬순서는 재업로드에 필요한 정보이므로 유지한다"],
+        ["보험요율·최저금액", "PERCENT는 보험요율 필수(0.2%는 0.002). 단가는 비워도 된다. 최저금액은 해당 통화 기준"],
+        ["숫자 검증", "운임·보험요율·최저금액은 0 이상. 운송일수·프리타임은 0 이상 정수. 견적 유효일수는 1~14"],
         [],
         ["구분코드", "설명"],
         *[[k, v] for k, v in KNOWN_CODES.items()],
@@ -118,12 +127,15 @@ def export(session: Session) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = RATE_SHEET
-    _header(ws, RATE_COLUMNS)
-    for r in session.scalars(select(Rate).order_by(Rate.source, Rate.pol, Rate.pod, Rate.sort_no, Rate.id)):
+    # 업체 원본 양식은 유지한다. 관리용 내보내기에만 선택 컬럼을 붙여 재업로드 시 정보를 보존한다.
+    _header(ws, RATE_COLUMNS + RATE_EXTRA_COLUMNS)
+    # 중복 요율 선택은 등록 순서를 사용하므로, 재업로드에서도 그 순서를 보존한다.
+    for r in session.scalars(select(Rate).order_by(Rate.id)):
         ws.append([r.charge_code, r.charge_label, r.pol or "", r.pod or "", r.container_type or "", r.incoterms or "",
                    BASIS_OUT.get(r.basis, r.basis), r.unit_price, r.currency, r.remark or "",
                    r.valid_from.isoformat() if r.valid_from else "", r.valid_until.isoformat() if r.valid_until else "",
-                   r.source or ""])
+                   r.source or "", r.carrier, r.direction, r.rate_pct, r.min_amount, r.etd, r.eta,
+                   r.transit_days, r.free_time_dem, r.free_time_det, r.source_ref, r.sort_no])
     lanes = wb.create_sheet(LANE_SHEET)
     _header(lanes, LANE_COLUMNS)
     for rule in session.scalars(select(LaneRule).order_by(LaneRule.pol, LaneRule.pod)):
@@ -153,10 +165,24 @@ def _number(value, where: str, errors: list[str], required: bool) -> float | Non
             errors.append(f"{where}: 값이 비어 있습니다")
         return None
     try:
-        return float(text)
+        number = float(text)
     except ValueError:
         errors.append(f"{where}: 숫자가 아닙니다 ({value})")
         return None
+    if not math.isfinite(number) or number < 0:
+        errors.append(f"{where}: 0 이상의 유한한 숫자여야 합니다 ({value})")
+        return None
+    return number
+
+
+def _integer(value, where: str, errors: list[str]) -> int | None:
+    number = _number(value, where, errors, required=False)
+    if number is None:
+        return None
+    if not number.is_integer():
+        errors.append(f"{where}: 0 이상의 정수여야 합니다 ({value})")
+        return None
+    return int(number)
 
 
 def _date(value, where: str, errors: list[str]) -> date | None:
@@ -199,13 +225,13 @@ def _container(value, where: str, errors: list[str], known: set[str]) -> str | N
     return None
 
 
-def _rows(ws, columns: list[str], errors: list[str]):
+def _rows(ws, columns: list[str], errors: list[str], optional: list[str] | tuple[str, ...] = ()):
     header = [_text(c.value) for c in ws[1]]
     missing = [c for c in columns if c not in header]
     if missing:
         errors.append(f"'{ws.title}' 시트 첫 줄에 칸 이름이 없습니다: {', '.join(missing)} (양식을 내려받아 쓰세요)")
         return
-    index = {name: header.index(name) for name in columns}
+    index = {name: header.index(name) for name in [*columns, *optional] if name in header}
     for n, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         if not row or all(v in (None, "") for v in row):
             continue
@@ -238,12 +264,29 @@ def _all(value) -> str | None:
     return None if text.upper() in ("", "ALL", "ANY", "-") else text
 
 
+def _duplicate_rate_errors(rates: list[Rate], locations: list[str]) -> list[str]:
+    """같은 출처의 동일 요율을 차단한다. 표시명·비고·원본 행·정렬순서는 비용을 구분하지 않는다."""
+    ignored = {"id", "charge_label", "remark", "source_ref", "sort_no"}
+    columns = [c.name for c in Rate.__table__.columns if c.name not in ignored]
+    seen: dict[tuple, str] = {}
+    errors = []
+    for rate, where in zip(rates, locations):
+        key = tuple((_all(rate.carrier) or "").upper() if name == "carrier" else getattr(rate, name)
+                    for name in columns)
+        if key in seen:
+            errors.append(f"{where}: {seen[key]}과 동일한 요율입니다 ({rate.charge_code}) — 중복 행을 삭제하세요")
+        else:
+            seen[key] = where
+    return errors
+
+
 def parse_client_workbook(session: Session, wb) -> tuple[list[Rate], list[str]]:
     """발주 측 요율표(OceanFreight·Surcharges 시트) → 요율 행. 'ALL'·'ANY'·'-'는 '모두'(빈칸)."""
     errors: list[str] = []
     known = set(session.scalars(select(ContainerType.code)))
     sheets = {name.lower(): wb[name] for name in wb.sheetnames}
     rates: list[Rate] = []
+    locations: list[str] = []
 
     def common(row, where):
         start, end = _date(row.get("valid_from"), f"{where} valid_from", errors), _date(row.get("valid_to"), f"{where} valid_to", errors)
@@ -261,9 +304,11 @@ def parse_client_workbook(session: Session, wb) -> tuple[list[Rate], list[str]]:
             where = f"OceanFreight {n}행"
             start, end, currency, cntr = common(row, where)
             price = _number(row.get("amount"), f"{where} amount", errors, required=True)
-            days = [_number(row.get(k), f"{where} {k}", errors, required=False)
+            days = [_integer(row.get(k), f"{where} {k}", errors)
                     for k in ("transit_days", "free_time_dem", "free_time_det")]
             etd, eta = _date(row.get("etd"), f"{where} etd", errors), _date(row.get("eta"), f"{where} eta", errors)
+            if etd and eta and eta < etd:
+                errors.append(f"{where}: eta가 etd보다 빠릅니다")
             rates.append(Rate(
                 charge_code="OCEAN_FREIGHT", charge_label="OCEAN FREIGHT", basis="PER_CNTR", unit_price=price,
                 pol=_port(row.get("pol"), f"{where} pol", errors), pod=_port(row.get("pod"), f"{where} pod", errors),
@@ -275,6 +320,7 @@ def parse_client_workbook(session: Session, wb) -> tuple[list[Rate], list[str]]:
                 remark=_text(row.get("remark")) or "PER CNTR", sort_no=10, source=CLIENT_SOURCE,
                 source_ref=f"OceanFreight#{_text(row.get('rate_id')) or n}",
             ))
+            locations.append(where)
     if "surcharges" in sheets:
         cols = ["charge_code", "charge_name", "basis", "currency", "valid_from", "valid_to"]
         for order, (n, row) in enumerate(_client_rows(sheets["surcharges"], cols, errors), start=1):
@@ -304,8 +350,10 @@ def parse_client_workbook(session: Session, wb) -> tuple[list[Rate], list[str]]:
                 valid_until=end, remark=_text(row.get("remark")) or None, sort_no=20 + order, source=CLIENT_SOURCE,
                 source_ref=f"Surcharges#{n}행 {code}",
             ))
+            locations.append(where)
     if not rates and not errors:
         errors.append("OceanFreight·Surcharges 시트에 요율이 한 줄도 없습니다")
+    errors.extend(_duplicate_rate_errors(rates, locations))
     return rates, errors
 
 
@@ -324,7 +372,8 @@ def parse_workbook(session: Session, data: bytes) -> tuple[list[Rate], list[Lane
     default_source = f"엑셀 업로드 {datetime.now(KST):%Y-%m-%d}"
 
     rates: list[Rate] = []
-    for n, row in _rows(wb[RATE_SHEET], RATE_COLUMNS, errors):
+    locations: list[str] = []
+    for n, row in _rows(wb[RATE_SHEET], RATE_COLUMNS, errors, RATE_EXTRA_COLUMNS):
         where = f"{RATE_SHEET} {n}행"
         code = _text(row["구분코드"]).upper().replace(" ", "_")
         if not code:
@@ -332,14 +381,24 @@ def parse_workbook(session: Session, data: bytes) -> tuple[list[Rate], list[Lane
         key = _text(row["기준"]).upper()
         basis = BASIS_IN.get(key) or BASIS_IN.get(key.replace(" ", ""))
         if basis is None:
-            errors.append(f"{where}: 기준은 R/T·CNTR·B/L·TRIP·AT COST 중 하나여야 합니다 ({row['기준']})")
+            errors.append(f"{where}: 기준은 R/T·CNTR·B/L·TRIP·SHIPMENT·PERCENT·AT COST 중 하나여야 합니다 ({row['기준']})")
         terms = _text(row["인코텀즈"]).upper() or None
         if terms and terms not in P.INCOTERMS:
             errors.append(f"{where}: 인코텀즈는 FOB·CIF·DDP·EXW 중 하나이거나 비워야 합니다 ({terms})")
         currency = (_text(row["통화"]) or "KRW").upper()
         if len(currency) != 3 or not currency.isalpha():
             errors.append(f"{where}: 통화는 USD·KRW 같은 3자리여야 합니다 ({currency})")
-        price = _number(row["단가"], f"{where} 단가", errors, required=basis != "AT_COST")
+        price = _number(row["단가"], f"{where} 단가", errors, required=basis not in ("AT_COST", "PERCENT"))
+        pct = _number(row.get("보험요율"), f"{where} 보험요율", errors, required=basis == "PERCENT")
+        minimum = _number(row.get("최저금액"), f"{where} 최저금액", errors, required=False)
+        direction = (_all(row.get("비용 방향")) or "").upper() or None
+        if direction and direction not in ("ORIGIN", "DEST"):
+            errors.append(f"{where}: 비용 방향은 ORIGIN·DEST 중 하나이거나 비워야 합니다 ({direction})")
+        etd, eta = (_date(row.get(k), f"{where} {k}", errors) for k in ("출항일", "도착일"))
+        if etd and eta and eta < etd:
+            errors.append(f"{where}: 도착일이 출항일보다 빠릅니다")
+        days = [_integer(row.get(k), f"{where} {k}", errors) for k in ("운송일수", "DEM 프리타임", "DET 프리타임")]
+        sort_no = _integer(row.get("정렬순서"), f"{where} 정렬순서", errors)
         start, end = _date(row["적용 시작"], f"{where} 적용 시작", errors), _date(row["적용 종료"], f"{where} 적용 종료", errors)
         if start and end and start > end:
             errors.append(f"{where}: 적용 시작이 종료보다 늦습니다")
@@ -348,10 +407,16 @@ def parse_workbook(session: Session, data: bytes) -> tuple[list[Rate], list[Lane
             pol=_port(row["선적항(POL)"], f"{where} 선적항", errors), pod=_port(row["도착항(POD)"], f"{where} 도착항", errors),
             container_type=_container(row["컨테이너"], f"{where} 컨테이너", errors, known), incoterms=terms,
             basis=basis or "PER_BL", unit_price=price if basis != "AT_COST" else None, currency=currency,
-            remark=_text(row["비고"]) or None, sort_no=10 if code == "OCEAN_FREIGHT" else 50,
+            remark=_text(row["비고"]) or None, sort_no=sort_no if sort_no is not None else (10 if code == "OCEAN_FREIGHT" else 50),
             valid_from=start, valid_until=end, source=_text(row["출처"]) or default_source,
+            carrier=_all(row.get("선사")), direction=direction, rate_pct=pct, min_amount=minimum,
+            etd=etd.isoformat() if etd else None, eta=eta.isoformat() if eta else None,
+            transit_days=days[0], free_time_dem=days[1], free_time_det=days[2],
+            source_ref=_text(row.get("원본 행")) or None,
         ))
+        locations.append(where)
 
+    errors.extend(_duplicate_rate_errors(rates, locations))
     lanes: list[LaneRule] | None = None
     if LANE_SHEET in wb.sheetnames:
         parsed = list(_rows(wb[LANE_SHEET], LANE_COLUMNS, errors))
@@ -359,7 +424,9 @@ def parse_workbook(session: Session, data: bytes) -> tuple[list[Rate], list[Lane
             lanes = []
             for n, row in parsed:
                 where = f"{LANE_SHEET} {n}행"
-                days = [_number(row[c], f"{where} {c}", errors, required=False) for c in LANE_COLUMNS[4:]]
+                days = [_integer(row[c], f"{where} {c}", errors) for c in LANE_COLUMNS[4:]]
+                if days[3] is not None and not 1 <= days[3] <= 14:
+                    errors.append(f"{where}: 견적 유효일수는 1~14일이어야 합니다")
                 lanes.append(LaneRule(
                     pol=_port(row["선적항(POL)"], f"{where} 선적항", errors),
                     pod=_port(row["도착항(POD)"], f"{where} 도착항", errors),

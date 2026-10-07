@@ -134,6 +134,8 @@ class DraftOut(CamelModel):
     subject: str
     html_body: str
     attachments: list[DraftAttachment]
+    # 보완 요청 초안만: 문항이 검증 결과와 같은지 {matches, expected, actual, added, missing} (FR-305). 검증 전이면 None
+    question_check: dict | None = None
 
 
 class SupplementRequest(CamelModel):
