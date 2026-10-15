@@ -66,10 +66,18 @@ def today_kst() -> date:
 
 
 def detect_dg(commodity: str | None) -> list[str]:
+    """영문은 단어 단위로 검사하고, 한글 키워드·UN번호 검사는 유지한다 (FR-308)."""
     if not commodity:
         return []
     upper = commodity.upper()
-    hits = [k for k in rules()["dangerousGoodsKeywords"] if k.upper() in upper]
+    hits = []
+    for keyword in rules()["dangerousGoodsKeywords"]:
+        k = keyword.upper()
+        if k.isascii():
+            if re.search(rf"(?<![A-Z0-9]){re.escape(k)}(?![A-Z0-9])", upper):
+                hits.append(keyword)
+        elif k in upper:
+            hits.append(keyword)
     if _UN_NUMBER.search(commodity):
         hits.append("UN번호")
     return hits
@@ -108,14 +116,19 @@ def check(session: Session, qi: QuoteInput, notes: list[dict] | None = None, tod
         info = review[field]
         if not info.get("evidence"):
             return rules()["questions"][field]  # 근거가 불확실하면 원문을 인용하지 않고 일반 질문으로 확인
-        label, ev = rules()["labels"][field], info["evidence"]
+        # A 패널은 줄마다 한 문항으로 나눈다. 인용 원문에 줄바꿈이 있어도 한 문항을 유지한다.
+        label, ev = rules()["labels"][field], " ".join(str(info["evidence"]).split())
+        label_en = rules().get("labelsEn", {}).get(field, field)
         if info.get("reason") == "UNPARSED":
             hint = rules().get("formatHints", {}).get(field)
             example = f" ({hint} 형식)" if hint else ""
+            hint_en = rules().get("formatHintsEn", {}).get(field)
+            example_en = f" (e.g. {hint_en})" if hint_en else ""
             return (f"{label}{josa(label, '을', '를')} 「{ev}」{josa(ev, '이라고', '라고')} 적어 주셨는데 정확히 읽지 못했습니다. "
-                    f"다시 알려 주세요{example}. (Please re-confirm: {ev})")
+                    f"다시 알려 주세요{example}. "
+                    f'(We could not read the {label_en} from "{ev}". Please provide it again{example_en}.)')
         return (f"{label}{josa(label, '을', '를')} 「{ev}」 기준으로 이해했습니다. 맞는지 확인 부탁드립니다. "
-                f"(Please confirm: {ev})")
+                f'(We understood the {label_en} based on "{ev}". Please confirm whether this is correct.)')
     issues: list[dict] = []
 
     def add(field: str, code: str, message: str, ask: str | None = None, **extra):
@@ -142,12 +155,12 @@ def check(session: Session, qi: QuoteInput, notes: list[dict] | None = None, tod
             options = " / ".join(note_codes[(field, "MULTIPLE_INCOTERMS")]["value"])
             add(field, "MULTIPLE_INCOTERMS", f"조건이 여러 개({options})",
                 f"견적 조건을 {options} 중 하나로 정해 주세요. 두 조건 모두 필요하시면 말씀해 주세요. "
-                f"(Please confirm one Incoterm: {options})")
+                f"(Please select one Incoterm from {options}. Please let us know if you need quotations for both.)")
         elif (field, "UNSUPPORTED_INCOTERMS") in note_codes:
             term = note_codes[(field, "UNSUPPORTED_INCOTERMS")]["value"]
             add(field, "UNSUPPORTED_INCOTERMS", f"지원하지 않는 조건: {term}",
                 f"요청하신 {term} 조건은 현재 FOB·CIF·DDP·EXW 기준으로 견적드리고 있습니다. 어느 조건으로 견적할지 알려 주세요. "
-                f"(We currently quote on FOB/CIF/DDP/EXW. Which term should we use instead of {term}?)")
+                f"(We currently quote on FOB/CIF/DDP/EXW. Please specify which term to use instead of {term}.)")
         elif field in review:
             code = "UNPARSED" if review[field].get("reason") == "UNPARSED" else "REVIEW"
             add(field, code, "값을 찾았지만 해석 못 함" if code == "UNPARSED" else "추출 신뢰도 낮음 — 검토 필요 (FR-209)",
@@ -216,7 +229,9 @@ def check(session: Session, qi: QuoteInput, notes: list[dict] | None = None, tod
             add("grossWeightKg", "OVER_WEIGHT",
                 f"{container.code} 1대 허용중량 {container.max_gross_kg:,.0f}kg 초과 (1대당 {per:,.0f}kg)",
                 f"총중량 {qi.grossWeightKg:,.0f}kg이 {container.code} {container_count}대 허용중량을 넘습니다. "
-                f"컨테이너 규격·대수를 확인해 주세요. (Gross weight exceeds the limit of {container_count} x {container.code}.)")
+                f"컨테이너 규격·대수를 확인해 주세요. "
+                f"(The gross weight of {qi.grossWeightKg:,.0f}kg exceeds the limit of {container_count} x {container.code}. "
+                "Please confirm the container type and quantity.)")
     # 허용중량 자료가 없는 컨테이너(예: 40RF)는 초과 검사를 못 한다 → 담당자 참고용으로만 알린다 (화주 문항 아님)
     if container and container.code != "LCL" and not container.max_gross_kg and qi.grossWeightKg:
         add("grossWeightKg", "NO_WEIGHT_LIMIT",
@@ -229,14 +244,18 @@ def check(session: Session, qi: QuoteInput, notes: list[dict] | None = None, tod
         add("totalCbm", "OVER_VOLUME",
             f"{container.code} {container_count}대 용적 {container.max_cbm * container_count:,.0f}CBM 초과 (화물 {cbm:,.2f}CBM)",
             f"화물 부피 {cbm:,.2f}CBM이 {container.code} {container_count}대에 실을 수 있는 부피를 넘습니다. "
-            f"컨테이너 규격·대수를 확인해 주세요. (Cargo volume exceeds the capacity of {container_count} x {container.code}.)")
+            f"컨테이너 규격·대수를 확인해 주세요. "
+            f"(The cargo volume of {cbm:,.2f} CBM exceeds the capacity of {container_count} x {container.code}. "
+            "Please confirm the container type and quantity.)")
 
     if has_box and qi.qty and qi.totalCbm and not bad_volume and not invalid_number(qi.qty):
         calculated = qi.boxL * qi.boxW * qi.boxH / 1e9 * qi.qty
         if calculated > 0 and abs(calculated - qi.totalCbm) / calculated > rules()["cbmTolerance"]:
             add("totalCbm", "CBM_MISMATCH", f"규격 기준 {calculated:.2f}CBM ≠ 기재 {qi.totalCbm}CBM",
                 f"박스 규격·수량으로 계산한 부피는 약 {calculated:.2f}CBM인데 전체 부피는 {qi.totalCbm}CBM으로 적혀 있습니다. "
-                f"정확한 부피를 확인해 주세요. (Calculated volume {calculated:.2f} CBM differs from stated {qi.totalCbm} CBM.)")
+                f"정확한 부피를 확인해 주세요. "
+                f"(The volume calculated from the box dimensions and quantity is approximately {calculated:.2f} CBM, "
+                f"but the stated total volume is {qi.totalCbm} CBM. Please confirm the correct volume.)")
     return issues
 
 
@@ -294,8 +313,21 @@ class RuleValidator:
         elif questions:
             case.status = "정보부족"
         else:
-            quote = quotation.build(session, case, extraction)
-            if quote is None:
+            try:
+                quote = quotation.build(session, case, extraction)
+            except quotation.InsuranceCurrencyError as error:
+                quote = None
+                hold.append({"code": "INSURANCE_CURRENCY_MISMATCH", "severity": "Block", "message": str(error)})
+            except quotation.QuoteInformationError as error:
+                quote = None
+                hold.append({"code": "QUOTE_INFO_INCOMPLETE", "severity": "Block",
+                             "message": str(error), "fields": error.fields})
+            except quotation.QuoteGenerationError as error:
+                quote = None
+                hold.append({"code": "QUOTE_GENERATION_FAILED", "severity": "Block", "message": str(error)})
+            if hold:
+                case.status = "보류"
+            elif quote is None:
                 case.status = "보류"
                 _rows, reason = quotation.rates_with_reason(session, qi, quotation.rate_date(qi, today_kst()))
                 hold.append({"code": "NO_RATE", "severity": severity("NO_RATE"), "message": reason or f"요율 없음 {qi.pol}→{qi.pod} {qi.containerType} (FR-501)"})

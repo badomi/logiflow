@@ -19,12 +19,11 @@ from openpyxl import load_workbook
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.pdfmetrics import registerFontFamily
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Paragraph
 
 log = logging.getLogger(__name__)
 
@@ -97,115 +96,166 @@ def _esc(text: str) -> str:
 
 def render_pdf(xlsx: bytes, item_rows: tuple[int, int] = (23, 34), total_row: int = 35,
                remark_rows: tuple[int, int] = (38, 49)) -> bytes:
-    """채워진 양식 XLSX(bytes) → PDF(bytes). 행 번호는 quotation.py의 양식 상수와 같다."""
+    """XLSX의 인쇄 영역·열 너비·행 높이·셀 스타일을 같은 비율로 PDF에 그린다."""
+    from math import floor
+    from xml.etree import ElementTree as ET
+    from zipfile import ZipFile
+    from openpyxl.utils import get_column_letter
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen.canvas import Canvas
+
     font = _font()
+    bold = "LeonaKR-Bold" if "LeonaKR-Bold" in pdfmetrics.getRegisteredFontNames() else font
     wb = load_workbook(io.BytesIO(xlsx))
     ws = wb.active
+    # 업체 양식의 인쇄 영역 A1:F49. 원본 열 너비/행 높이를 읽고 빈 비용 행도 그린다.
+    # Excel 열 너비는 기본 글꼴 숫자 폭 기준이다(이 양식: 맑은 고딕 11pt).
+    digit_width = round(max(pdfmetrics.stringWidth(str(d), font, wb._fonts[0].sz or 11) for d in range(10)) * 4 / 3)
+    widths = [floor(ws.column_dimensions[get_column_letter(c)].width * digit_width + 5) * .75 for c in range(1, 7)]
+    heights = [ws.row_dimensions[r].height or ws.sheet_format.defaultRowHeight for r in range(1, 50)]
+    xs, ys = [0.0], [0.0]
+    for width in widths:
+        xs.append(xs[-1] + width)
+    for height in heights:
+        ys.append(ys[-1] + height)
+    page_w, page_h = A4
+    margins = ws.page_margins
+    left, top = margins.left * 72, page_h - margins.top * 72
+    scale = min((page_w - (margins.left + margins.right) * 72) / xs[-1],
+                (page_h - (margins.top + margins.bottom) * 72) / ys[-1])
+    if ws.print_options.horizontalCentered:
+        left = (page_w - xs[-1] * scale) / 2
+    buffer = io.BytesIO()
+    canvas = Canvas(buffer, pagesize=A4)
+    canvas.setTitle(str(ws["B12"].value or "Quotation"))
+    canvas.translate(left, top)
+    canvas.scale(scale, scale)
 
-    def val(ref: str) -> str:
-        return _fmt(ws[ref]).strip()
+    merged = {}
+    for area in ws.merged_cells.ranges:
+        for row in range(area.min_row, area.max_row + 1):
+            for col in range(area.min_col, area.max_col + 1):
+                merged[row, col] = area
 
-    def hidden(row: int) -> bool:
-        return bool(ws.row_dimensions[row].hidden)
+    theme_ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    theme = ET.fromstring(wb.loaded_theme) if wb.loaded_theme else None
+    theme_names = ("lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink")
 
-    merged_ce = {m.min_row for m in ws.merged_cells.ranges
-                 if m.min_col == 3 and m.max_col == 5 and m.min_row == m.max_row}
+    def color(value, default=colors.black):
+        from openpyxl.styles.colors import COLOR_INDEX
+        if value is not None and value.type == "rgb":
+            return colors.HexColor("#" + value.rgb[-6:])
+        if value is not None and value.type == "indexed" and value.indexed < len(COLOR_INDEX):
+            return colors.HexColor("#" + COLOR_INDEX[value.indexed][-6:])
+        if value is not None and value.type == "theme" and theme is not None and value.theme < len(theme_names):
+            node = theme.find(f".//a:clrScheme/a:{theme_names[value.theme]}", theme_ns)
+            if node is not None and len(node):
+                rgb = node[0].get("lastClr") or node[0].get("val")
+                channels = [int(rgb[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+                tint = value.tint
+                channels = [v * (1 + tint) if tint < 0 else v * (1 - tint) + tint for v in channels]
+                return colors.Color(*channels)
+        return default
 
-    st = ParagraphStyle("t", fontName=font, fontSize=8.5, leading=12)
-    st_r = ParagraphStyle("r", parent=st, alignment=2)
-    st_c = ParagraphStyle("c", parent=st, alignment=1, leading=10)
-    b = lambda t: f"<b>{_esc(t)}</b>"  # noqa: E731
+    text_runs = []
+    for row in range(1, 50):
+        for col in range(1, 7):
+            cell = ws.cell(row, col)
+            area = merged.get((row, col))
+            if area and (row, col) != (area.min_row, area.min_col):
+                continue
+            end_col = min(area.max_col if area else col, 6)
+            end_row = min(area.max_row if area else row, 49)
+            x, y = xs[col - 1], -ys[end_row]
+            width, height = xs[end_col] - x, ys[end_row] - ys[row - 1]
+            if cell.fill.patternType == "solid":
+                canvas.setFillColor(color(cell.fill.fgColor, colors.white))
+                canvas.rect(x, y, width, height, fill=1, stroke=0)
+            for side, coords in (
+                (cell.border.left, (x, y, x, y + height)),
+                (cell.border.right, (x + width, y, x + width, y + height)),
+                (cell.border.top, (x, y + height, x + width, y + height)),
+                (cell.border.bottom, (x, y, x + width, y)),
+            ):
+                if side and side.style:
+                    canvas.setStrokeColor(color(side.color))
+                    canvas.setLineWidth(1.5 if side.style in ("medium", "thick") else .6)
+                    canvas.line(*coords)
+            text = _fmt(cell)
+            if not text:
+                continue
+            # 셀 테두리가 없는 안내/화물 정보는 Excel처럼 오른쪽 빈 칸으로 이어 쓴다.
+            bordered = any(s and s.style for s in (cell.border.left, cell.border.right, cell.border.top, cell.border.bottom))
+            if not bordered and not area:
+                if col in (2, 3):
+                    end = col
+                    while end < 6 and ws.cell(row, end + 1).value is None:
+                        end += 1
+                    width = xs[end] - x
+                elif cell.alignment.horizontal == "right":
+                    start = col
+                    while start > 2 and ws.cell(row, start - 1).value is None:
+                        start -= 1
+                    x = xs[start - 1]
+                    width = xs[end_col] - x
+            if cell.coordinate == "B12":
+                width = xs[4] - xs[1]  # 원본 Subject 도형의 실제 폭
+            alignment = {"center": 1, "right": 2}.get(cell.alignment.horizontal, 0)
+            size = float(cell.font.sz or 10)
+            paragraph = None
+            while size >= 6:
+                style = ParagraphStyle("cell", fontName=bold if cell.font.b else font,
+                                       fontSize=size, leading=size * 1.12, alignment=alignment,
+                                       textColor=color(cell.font.color), wordWrap="CJK")
+                paragraph = Paragraph(_esc(text).replace("\n", "<br/>"), style)
+                pw, ph = paragraph.wrap(max(width - 5, 1), height)
+                if ph <= height - 2:
+                    break
+                size -= .5
+            else:
+                raise ValueError(f"원본 양식 {cell.coordinate} 칸에 내용이 들어가지 않습니다.")
+            vertical = cell.alignment.vertical
+            py = y + (height - ph) / 2 if vertical == "center" else y + height - ph - 1 if vertical == "top" else y + 1
+            text_runs.append((paragraph, x + 2.5, py))
 
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=16 * mm, rightMargin=16 * mm,
-                            topMargin=18 * mm, bottomMargin=14 * mm, title=val("B12").replace("Subject : ", ""))
-    width = A4[0] - 32 * mm
-    story: list = []
+    # 빈 셀의 배경색이 왼쪽에서 이어진 안내 문구를 덮지 않도록 글자는 마지막에 그린다.
+    for paragraph, x, y in text_runs:
+        paragraph.drawOn(canvas, x, y)
 
-    # 머리글: 로고 + 회사 주소 (F2~F6)
-    logo = None
-    if ws._images:
-        try:
-            data = ws._images[0]._data()
-            logo = Image(io.BytesIO(data), width=58 * mm, height=23 * mm)
-        except Exception:  # noqa: BLE001 — 로고를 못 읽어도 PDF는 만든다
-            log.warning("양식 로고를 읽지 못해 생략")
-    company = val("F2")
-    address = "<br/>".join(_esc(val(f"F{r}")) for r in (4, 5, 6) if val(f"F{r}"))
-    head = Table([[logo or "", Paragraph(f"<i>{b(company)}</i><br/><br/>{address}", st_r)]],
-                 colWidths=[width * 0.5, width * 0.5])
-    head.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
-    story += [head, Spacer(1, 9 * mm)]
-
-    # 수신·발신·Subject·인사말
-    for ref in ("B9", "B10"):
-        if val(ref):
-            story.append(Paragraph(b(val(ref)), st))
-    story.append(Spacer(1, 3 * mm))
-    subject = Table([[Paragraph(b(val("B12")), st)]], colWidths=[width * 0.6], hAlign="LEFT")
-    subject.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.8, colors.black),
-                                 ("LINEBELOW", (0, 0), (-1, -1), 1.6, colors.black),
-                                 ("LINEAFTER", (0, 0), (-1, -1), 1.6, colors.black)]))
-    story += [subject, Spacer(1, 3 * mm)]
-    for ref in ("B14", "B15"):
-        if val(ref):
-            story.append(Paragraph(_esc(val(ref)), st))
-    story.append(Spacer(1, 4 * mm))
-
-    # ** POL / SHIPPING METHOD / CARGO DETAIL / PAYMENT TERM (B17~C20) + DATE (E21·F21)
-    info = [[Paragraph(_esc(val(f"B{r}")), st), Paragraph(_esc(val(f"C{r}")), st)]
-            for r in range(17, 21) if not hidden(r) and (val(f"B{r}") or val(f"C{r}"))]
-    date = " ".join(x for x in (val("E21"), val("F21")) if x)
-    info.append(["", Paragraph(b(date), st_r)])
-    t = Table(info, colWidths=[width * 0.27, width * 0.73])
-    t.setStyle(TableStyle([("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1)]))
-    story += [t, Spacer(1, 1 * mm)]
-
-    # 비용 표: 머리글(22행) + 쓴 비용 줄 + TOTAL
-    header_row = item_rows[0] - 1
-    rows = [[Paragraph(b(val(f"{c}{header_row}")), st_c) for c in "BCDEF"]]
-    spans = []
-    for r in range(item_rows[0], item_rows[1] + 1):
-        if hidden(r) or not val(f"B{r}"):
-            continue
-        i = len(rows)
-        if r in merged_ce:
-            rows.append([Paragraph(b(val(f"B{r}")), st_c), Paragraph(_esc(val(f"C{r}")), st_c), "", "",
-                         Paragraph(_esc(val(f"F{r}")), st_c)])
-            spans.append(("SPAN", (1, i), (3, i)))
+    # 원본 그림 위치를 그대로 사용한다. 로고를 별도의 머리글로 재배치하지 않는다.
+    for logo in ws._images:
+        anchor = logo.anchor
+        origin = anchor._from
+        x = xs[origin.col] + origin.colOff / 12700
+        y = ys[origin.row] + origin.rowOff / 12700
+        if hasattr(anchor, "ext"):
+            width, height = anchor.ext.cx / 12700, anchor.ext.cy / 12700
         else:
-            rows.append([Paragraph(b(val(f"B{r}")), st_c)]
-                        + [Paragraph(_esc(val(f"{c}{r}")), st_c) for c in "CDEF"])
-    n = len(rows)
-    rows.append([Paragraph(b(val(f"B{total_row}")), st_c), Paragraph(b(val(f"C{total_row}")), st_c), "", "",
-                 Paragraph(b(val(f"F{total_row}")), st_c)])
-    table = Table(rows, colWidths=[width * 0.25, width * 0.18, width * 0.09, width * 0.18, width * 0.30],
-                  repeatRows=1)
-    table.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.7, colors.black),
-        ("BOX", (0, 0), (-1, -1), 1.2, colors.black),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#BFBFBF")),
-        ("BACKGROUND", (0, n), (-1, n), colors.HexColor("#FFFF00")),
-        ("SPAN", (1, n), (3, n)),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        *spans,
-    ]))
-    story += [table, Spacer(1, 9 * mm)]
+            width = xs[anchor.to.col] + anchor.to.colOff / 12700 - x
+            height = ys[anchor.to.row] + anchor.to.rowOff / 12700 - y
+        canvas.drawImage(ImageReader(io.BytesIO(logo._data())), x, -y - height, width, height, mask="auto")
 
-    # Remark ~ 감사합니다 ~ 직인명판 (38~49행)
-    first, last = remark_rows
-    for r in range(first, last + 1):
-        if hidden(r):
-            continue
-        left, right = val(f"B{r}"), val(f"F{r}")
-        if r == last - 1 and left:
-            story.append(Spacer(1, 4 * mm))          # '* 감사합니다.' 앞 여백 (양식처럼)
-        if r == first and left:
-            story += [Paragraph(f"<u>{b(left)}</u>", st), Spacer(1, 1 * mm)]
-        elif left:
-            story.append(Paragraph(_esc(left), st))
-        if right:
-            story += [Spacer(1, 3 * mm), Paragraph(_esc(right), st_r)]
-    doc.build(story)
-    return buf.getvalue()
+    # openpyxl이 읽지 않는 원본 Subject 사각형도 OOXML의 앵커 위치로 복원한다.
+    ns = {"x": "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing",
+          "a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    with ZipFile(io.BytesIO(xlsx)) as archive:
+        for name in archive.namelist():
+            if not name.startswith("xl/drawings/drawing") or not name.endswith(".xml"):
+                continue
+            for anchor in ET.fromstring(archive.read(name)):
+                if anchor.find("x:sp", ns) is None:
+                    continue
+                start, end = anchor.find("x:from", ns), anchor.find("x:to", ns)
+                if start is None or end is None:
+                    continue
+                def point(node):
+                    return (xs[int(node.findtext("x:col", namespaces=ns))] + int(node.findtext("x:colOff", namespaces=ns)) / 12700,
+                            ys[int(node.findtext("x:row", namespaces=ns))] + int(node.findtext("x:rowOff", namespaces=ns)) / 12700)
+                x1, y1 = point(start)
+                x2, y2 = point(end)
+                canvas.setStrokeColor(colors.black)
+                canvas.setLineWidth(.75)
+                canvas.rect(x1, -y2, x2 - x1, y2 - y1, fill=0, stroke=1)
+    canvas.showPage()
+    canvas.save()
+    return buffer.getvalue()

@@ -5,13 +5,12 @@
 - 파생 필드(quoteCurrency·transitTime·freeTimeDet/Dem·validityDays·exchangeRateAsOf)를 lane_rules에서 채운다 (FR-507·508).
 - 파일은 storage/<케이스ID>/quotes/<케이스ID>_견적서.xlsx → A트랙 [견적서 송부 초안]이 그대로 첨부한다.
   다시 계산하면 이전 파일은 quote-history/로 옮긴다 (송부 초안에 옛 버전이 같이 붙지 않도록).
-- 케이스 ID를 Subject 줄에 표기한다 (FR-102: 화면·메일 제목·견적서 동일 표기).
-- 고정 문구는 기본 영문 (FR-510). .env의 QUOTE_LANGUAGE=ko 로 발주 측 예시의 한글 문구를 쓸 수 있다.
+- 케이스 ID는 하단 Remark에 표기하고 원본 Subject 줄은 그대로 둔다 (FR-102).
+- 원본 배치를 유지하며 고정 문구는 기본 영문으로 출력한다 (FR-510). QUOTE_LANGUAGE=ko이면 원본 한글 문구를 쓴다.
 
 PDF는 LibreOffice로 같은 XLSX를 변환하고, 없거나 실패하면 내장 엔진(quote_pdf.py)으로 만들어 옆에 둔다 → 송부 초안에 PDF·XLSX가 함께 첨부된다 (MUST-SHIP ④).
 """
 
-import io
 import logging
 import math
 from datetime import date
@@ -19,13 +18,17 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
+import uuid
+from copy import copy
+from io import BytesIO
 from pathlib import Path
 from datetime import timedelta, timezone
 
 from openpyxl import load_workbook
-from openpyxl.styles import Alignment, Border, Side
+from pypdf import PdfReader
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -33,6 +36,7 @@ from . import drafts
 from .config import KST, settings
 from .extraction import ports
 from .models import Case, ContainerType, LaneRule, Quote, QuoteItem, QuoteTotal, Rate
+from .quote_template import save_filled_template
 
 # 해상운임이 견적에 반드시 들어가야 하는 조건. FOB는 해상운임을 매수인이 부담해 국내 비용만 견적한다.
 FREIGHT_REQUIRED = ("CIF", "DDP", "EXW")
@@ -305,6 +309,110 @@ def money(value: float, currency: str) -> float:
     return float(round(value)) if currency == "KRW" else round(value + 1e-9, 2)
 
 
+class QuoteGenerationError(ValueError):
+    """필수 산출물 두 개를 완성하지 못했을 때 C 검증 결과로 안내한다."""
+
+
+class InsuranceCurrencyError(ValueError):
+    """환산 기준 없이 서로 다른 통화로 비율 보험료를 산정하지 않는다."""
+
+
+def require_insurance_currency(rate: Rate, qi) -> None:
+    if (rate.charge_code or "").upper() not in INSURANCE_CODES:
+        return
+    if qi.ccy and qi.ccy != rate.currency:
+        raise InsuranceCurrencyError(
+            f"보험료 산정 통화 불일치 — 인보이스 {qi.ccy} / 보험요율 {rate.currency}. "
+            "환산 기준이 없어 자동 견적을 보류합니다. 담당자가 통화와 요율을 확인해 주세요."
+        )
+
+
+class QuoteInformationError(ValueError):
+    """FR-507 필수 정보가 부족하거나 유효하지 않아 견적을 보류한다."""
+
+    def __init__(self, issues: dict[str, str]):
+        self.fields = list(issues)
+        super().__init__(
+            "FR-507 필수 견적 정보 확인 필요 — " + "; ".join(issues.values())
+            + ". 요율·룰 정보를 보완한 뒤 다시 실행해 주세요."
+        )
+
+
+def export_fob_schedule(session: Session, qi, on_date: date,
+                        wanted_carrier: str | None) -> tuple[Rate | None, str | None]:
+    """수출 FOB의 일정만 조회한다. 선택한 해상운임은 청구 목록에 추가하지 않는다.
+
+    incoterms는 비용 적용 조건이므로 일정 조회에는 쓰지 않는다. 구간·컨테이너·
+    유효기간과 기존 선사 선택 규칙은 그대로 적용한다 (FR-503·507).
+    """
+    rows = list(session.scalars(select(Rate).where(
+        Rate.charge_code == "OCEAN_FREIGHT",
+        _applies(Rate.pol, qi.pol), _applies(Rate.pod, qi.pod),
+        _applies(Rate.container_type, qi.containerType),
+        or_(Rate.valid_from.is_(None), Rate.valid_from <= on_date),
+        or_(Rate.valid_until.is_(None), Rate.valid_until >= on_date),
+    ).order_by(Rate.sort_no, Rate.id)).all())
+    try:
+        selected, carrier = choose_carrier(rows, wanted_carrier)
+    except RateSelectionError as error:
+        raise QuoteInformationError({"carrier": str(error)}) from error
+    return (selected[0] if selected else None), carrier
+
+
+def required_schedule(qi, freight: Rate | None, on_date: date, today: date,
+                      rates: list[Rate]) -> tuple[str, str, str]:
+    """파일·견적 버전을 만들기 전에 일정, Free Time, 유효기간을 확인한다."""
+    issues: dict[str, str] = {}
+    for field, label, minimum in (
+        ("transitTime", "Transit Time(운송일수)", 0),
+        ("freeTimeDet", "Free Time DET", 0),
+        ("freeTimeDem", "Free Time DEM", 0),
+        ("validityDays", "견적 유효일수", 1),
+    ):
+        value = getattr(qi, field)
+        if value is None:
+            issues[field] = f"{label} 누락"
+        elif type(value) is not int or value < minimum:
+            issues[field] = f"{label}은 {minimum} 이상의 정수여야 합니다"
+
+    def read_date(field: str, value: str | None) -> date | None:
+        if not value:
+            issues[field] = f"{field.upper()} 누락"
+            return None
+        try:
+            return date.fromisoformat(value)
+        except (TypeError, ValueError):
+            issues[field] = f"{field.upper()} 날짜 형식 오류"
+            return None
+
+    etd = read_date("etd", freight.etd if freight else None)
+    raw_eta = freight.eta if freight else None
+    if not raw_eta and etd is not None and "transitTime" not in issues:
+        try:
+            eta = etd + timedelta(days=qi.transitTime)  # ETA = ETD + 운송일수 (0일도 유효)
+        except OverflowError:
+            eta = None
+            issues["eta"] = "ETA 계산 가능한 날짜 범위 초과"
+    else:
+        eta = read_date("eta", raw_eta)
+    if etd is not None and etd < on_date:
+        issues["etd"] = f"ETD {etd}가 선적 기준일 {on_date}보다 이전입니다"
+    if etd is not None and eta is not None and eta < etd:
+        issues["eta"] = f"ETA {eta}가 ETD {etd}보다 이전입니다"
+
+    valid_until = None
+    if "validityDays" not in issues:
+        try:
+            valid_until = valid_until_date(today, qi.validityDays, rates)
+        except OverflowError:
+            issues["validUntil"] = "견적 유효기간 계산 가능한 날짜 범위 초과"
+        if valid_until is not None and valid_until < today:
+            issues["validUntil"] = f"견적 유효기간 {valid_until}이 발행일 {today}보다 이전입니다"
+    if issues:
+        raise QuoteInformationError(issues)
+    return etd.isoformat(), eta.isoformat(), valid_until.isoformat()
+
+
 def build(session: Session, case: Case, extraction: dict | None = None) -> dict | None:
     started = time.perf_counter()  # 견적서 생성 시간 측정 (NFR-02: 10초 이내)
     qi = case.quote_input
@@ -319,8 +427,14 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
     rates, _reason = rates_with_reason(session, qi, on_date, wanted_carrier)
     if not rates:
         return None
+    # 적용 대상 보험료만 확인한다. 보류 시 견적 버전·파일을 만들지 않는다.
+    for rate in rates:
+        if rate.basis == "PERCENT":
+            require_insurance_currency(rate, qi)
     _, carrier = choose_carrier(rates, wanted_carrier)
     freight = next((r for r in rates if r.charge_code == "OCEAN_FREIGHT"), None)
+    if (qi.incoterms or "").upper() == "FOB" and trade_role(qi) == EXPORT:
+        freight, carrier = export_fob_schedule(session, qi, on_date, wanted_carrier)
 
     rule = lane_rule(session, qi)
     qi.quoteCurrency = rule.quote_currency if rule else "USD"
@@ -333,21 +447,10 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
                       else (rule.free_time_dem if rule else None))
     qi.validityDays = rule.validity_days if rule else default_validity_days()
     qi.exchangeRateAsOf = today.isoformat()  # 실제 환율은 출항일 기준 적용 — 견적서 비고에 고지 (FR-508)
-    etd = freight.etd if freight else None
-    eta = freight.eta if freight else None
-    if etd and not eta and qi.transitTime:
-        eta = (date.fromisoformat(etd) + timedelta(days=qi.transitTime)).isoformat()  # ETA = ETD + 운송일수
-    # 요율표의 출항일이 선적 기준일(화물 준비일, 지났으면 오늘)보다 이르면 탈 수 없는 배다 → 확정 일정처럼 적지 않는다 (FR-507)
-    schedule_unconfirmed = False
-    try:
-        schedule_unconfirmed = bool(etd) and date.fromisoformat(etd) < on_date
-    except ValueError:
-        schedule_unconfirmed = True
-    if schedule_unconfirmed:
-        etd = eta = None
+    etd, eta, valid_until = required_schedule(qi, freight, on_date, today, rates)
 
     version = (session.scalar(select(func.max(Quote.version_no)).where(Quote.case_pk == case.id)) or 0) + 1
-    quote = Quote(case=case, version_no=version, valid_until=valid_until_date(today, qi.validityDays, rates).isoformat(),
+    quote = Quote(case=case, version_no=version, valid_until=valid_until,
                   carrier=carrier, etd=etd, eta=eta)
     totals: dict[str, float] = {}
     for rate in rates:
@@ -370,17 +473,27 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
     session.flush()
 
     try:
-        xlsx = render_xlsx(case, quote, count, count_note, schedule_unconfirmed)
-    except Exception:
-        retire_files(case, version - 1)  # 새 견적서를 못 만들고 '실패'로 끝나도 옛 견적서가 송부 초안에 남지 않게
-        raise
-    retire_files(case, version - 1)  # 이전 판의 PDF·XLSX를 함께 옮긴다 → 폴더에 서로 다른 판이 섞이지 않는다
-    quote.xlsx_path = _save(case, quote, "xlsx", xlsx)
-    pdf_path, pdf_note = None, None
-    if settings.quote_pdf:
+        xlsx = render_xlsx(case, quote, count, count_note)
+        if not settings.quote_pdf:
+            raise QuoteGenerationError("PDF 생성 설정이 꺼져 있습니다. PDF·XLSX를 함께 생성해야 합니다.")
         pdf, pdf_note = to_pdf(xlsx)
-        if pdf:
+        if not pdf or not pdf.startswith(b"%PDF"):
+            raise QuoteGenerationError(pdf_note or "PDF 생성 결과가 없습니다.")
+        # 두 파일을 먼저 완성한 후 저장한다. 한쪽 저장에 실패해도 부분 파일은 첨부되지 않게 치운다.
+        retire_files(case, version - 1)
+        try:
+            quote.xlsx_path = _save(case, quote, "xlsx", xlsx)
             pdf_path = _save(case, quote, "pdf", pdf)
+        except Exception:
+            retire_files(case, version)
+            raise
+    except Exception as error:
+        for item in [*quote.items, *quote.totals]:
+            session.delete(item)
+        session.delete(quote)  # 실패한 산출물을 정상 견적 버전으로 남기지 않는다.
+        session.flush()
+        retire_files(case, version - 1)
+        raise QuoteGenerationError(f"견적서 생성 실패 — PDF·XLSX 송부를 보류합니다: {error}") from error
     session.flush()
     elapsed_ms = round((time.perf_counter() - started) * 1000)
     return {
@@ -401,7 +514,7 @@ def build(session: Session, case: Case, extraction: dict | None = None) -> dict 
         "carrier": carrier,
         "carrierRequested": wanted_carrier,
         "etd": etd, "eta": eta,
-        "scheduleUnconfirmed": schedule_unconfirmed,  # True = 준비일 이후 출항 스케줄이 요율표에 없음 → 담당자 확인
+        "scheduleUnconfirmed": False,  # 기존 반환 형식 유지. 일정 미확보 시에는 견적 자체를 보류한다.
         "lines": [{"charge": i.charge_label, "amount": i.amount, "currency": i.currency, "source": i.source_ref}
                   for i in quote.items],  # 금액별 근거 (어느 요율표 행) FR-509
     }
@@ -433,8 +546,9 @@ INSURED_VALUE_RATIO = 1.10  # 보험료 = 계약금액 × 110% × 보험요율 (
 def percent_amount(rate: Rate, qi) -> tuple[float | None, str | None]:
     """화물가액 × 비율, 최저 금액. 보험료는 계약금액의 110%에 보험요율을 곱한다 (예: 15,000 × 110% × 0.2% = 33, 최저 30).
 
-    통화가 다르면 계산하지 않는다(환율 미반영).
+    통화가 다른 비율 보험료는 담당자 확인 전까지 견적을 보류한다(환율 미반영).
     """
+    require_insurance_currency(rate, qi)
     pct = rate.rate_pct or 0
     insured = (rate.charge_code or "").upper() in INSURANCE_CODES
     ratio = INSURED_VALUE_RATIO if insured else 1.0
@@ -466,15 +580,16 @@ def total_text(quote: Quote) -> str:
     return " + ".join(parts)
 
 
-# 견적서 고정 문구 (FR-510: 견적서는 기본 영문). ko는 발주 측 예시 견적서(LCL·FOB PDF)의 한글 문구 그대로.
-# .env의 QUOTE_LANGUAGE=ko 로 바꾼다. 화주가 적은 값(회사명·품목 등)과 요율표 비고는 번역하지 않는다.
+# 원본 파일은 보존하고 생성본의 고정 문구만 선택한 언어로 채운다 (기본 영문, FR-510).
+# 화주가 적은 회사명·담당자명은 임의로 번역하지 않는다.
 TEXT = {
     "en": {
         "to": "To : {customer} / Attn : {contact}", "to_one": "To : {name}",
         "from": "From : LEONA SEA & AIR CO., LTD. / Quotation Team",
-        "subject": "Subject : Ocean Freight Quotation  [{case_id}]",
-        "greeting1": "* Thank you for your inquiry.",
-        "greeting2": "* We are pleased to quote as below for your reference.",
+        "subject": "Subject : Ocean Freight Quotation",
+        "greeting1": "* We wish your company continued success.",
+        "greeting2": "* Please find our quotation below for your reference.",
+        "thanks": "* Thank you.", "seal": "(Company seal omitted)",
         "rt_basis": " (based on {rt} R/T)",
         # FR-508: 견적 통화·환율 기준일 명시 + '유효기간 내 환율 변동에 따라 변동될 수 있음' 고지
         "fx": "* Quote currency: {currency} / Exchange rate as of {as_of} (rate on the actual sailing date applies).",
@@ -484,16 +599,12 @@ TEXT = {
         "transit": "* T/T : approx. {days} days",
         "free_time": "* FREE TIME : DET {det} days / DEM {dem} days",
         "validity": "* VALIDITY : {date}",
-        "dest_consignee": "* Destination charges are for consignee's account.",
         "duty_separate": "* Customs duty and VAT are not included and will be charged separately.",
         "quote_no": "* QUOTE NO. : {case_id} (Rev. {version})",
-        "thanks": "* Thank you.", "seal": "(Company seal omitted)",
     },
     "ko": {
-        "to": "수 신 : {customer} / {contact} 님", "to_one": "수 신 : {name} 님",
+        "to": "수 신 : {customer} / {contact}", "to_one": "수 신 : {name}",
         "from": "발 신 : 레오나 해운항공㈜ / 견적 담당 드림",
-        "subject": "Subject : 해상 수출 운임 제안서  [{case_id}]",
-        "greeting1": None, "greeting2": None,  # 양식에 적힌 문구를 그대로 둔다
         "rt_basis": " ({rt} R/T 기준)",
         "fx": "* 견적 통화 {currency} · 환율 기준일 {as_of} (실제 출항일 환율 적용)",
         "subject_to_change": "* 유효기간 내 환율 변동 및 화물 DETAIL의 변경에 따라 상기 견적이 달라질 수 있습니다.",
@@ -502,10 +613,8 @@ TEXT = {
         "transit": "* T/T : 약 {days}일",
         "free_time": "* FREE TIME : DET {det}일 / DEM {dem}일",
         "validity": "* VALIDITY : {date}",
-        "dest_consignee": "* 도착지 비용 수하인 부담",
         "duty_separate": "* 관세·부가세 별도",
         "quote_no": "* 견적번호 : {case_id} (v{version})",
-        "thanks": None, "seal": None,
     },
 }
 BASIS_LABEL = {"PER_RT": "PER R/T", "PER_CNTR": "PER CNTR", "PER_BL": "PER B/L", "PER_SHIPMENT": "PER SHIPMENT",
@@ -518,7 +627,8 @@ _COUNT_NOTE = re.compile(r"컨테이너 대수: 화물 (.+) 기준 (.+) (\d+)대
 
 
 def language() -> str:
-    lang = (getattr(settings, "quote_language", None) or "en").lower()
+    """FR-510 기본 영문. 명시적으로 ko를 선택했을 때만 원본 한글 문구를 쓴다."""
+    lang = (getattr(settings, "quote_language", None) or "en").strip().lower()
     return lang if lang in TEXT else "en"
 
 
@@ -567,14 +677,12 @@ def recipient_line(case: Case, lang: str) -> str:
             fallback = (original.from_name or original.from_email or "").strip()
         except Exception:  # noqa: BLE001 — 수신 줄 때문에 견적서가 실패하면 안 된다
             fallback = ""
-    return t["to_one"].format(name=fallback).replace(" 님", "") if lang == "ko" else t["to_one"].format(name=fallback)
+    return t["to_one"].format(name=fallback)
 
 
 def incoterm_remarks(incoterms: str | None, lang: str) -> list[str]:
-    """조건별 고지 문구 (발주 측 회신 2026-10-06): FOB·CIF는 '도착지 비용 수하인 부담', DDP는 관세·부가세 '별도'."""
+    """조건별 고지 문구. DDP의 관세·부가세 별도 안내를 유지한다."""
     t, terms = TEXT[lang], (incoterms or "").upper()
-    if terms in ("FOB", "CIF"):
-        return [t["dest_consignee"]]
     if terms == "DDP":
         return [t["duty_separate"]]
     return []
@@ -588,9 +696,6 @@ def count_note_text(note: str, lang: str) -> str:
     return f"Container q'ty : {m[3]} x {m[2]} (estimated from cargo {m[1].replace('·', ' / ')})"
 
 
-COUNTRY = {"KR": "KOREA"}  # FOB 예시의 'BUSAN, KOREA' 표기용 (수출 견적은 선적항이 국내)
-
-
 def _korean_date(iso: str | None) -> str:
     """'2026-09-30' → '2026년 9월 30일' (예시 견적서 VALIDITY 표기)"""
     if not iso:
@@ -599,28 +704,57 @@ def _korean_date(iso: str | None) -> str:
     return f"{int(y)}년 {int(m)}월 {int(d)}일"
 
 
-def _box(ws, row: int, first: str, last: str) -> None:
-    thin, thick = Side(style="thin"), Side(style="medium")
-    cols = [chr(c) for c in range(ord(first), ord(last) + 1)]
-    for col in cols:
-        ws[f"{col}{row}"].border = Border(
-            left=thin if col == first else None, right=thick if col == last else None, top=thin, bottom=thick,
+# 비용 적용 여부·금액은 rates_with_reason/build가 정한다. 아래는 출력 위치만 정한다.
+COST_ROWS = {
+    "OCEAN_FREIGHT": 23, "BAF": 23,
+    "THC": 24, "OTHC": 24, "DTHC": 24,
+    "DOC_FEE": 25, "DOC": 25, "BL": 25,
+    "SEAL": 26, "WFG": 27, "WHARFAGE": 27, "PSF": 28, "PFS": 29,
+    "CFS": 30, "SHUTTLE": 31, "SHORING": 32, "CUSTOMS": 33, "INSURANCE": 34, "INS": 34,
+}
+BREAKDOWN_LABELS = {"OCEAN_FREIGHT": "Base", "BAF": "BAF", "OTHC": "Origin THC", "DTHC": "Destination THC",
+                    "DOC": "DOC", "DOC_FEE": "DOC", "BL": "B/L"}
+
+
+def display_groups(items):
+    """동일 통화·부과 기준·수량의 비용만 합친다. 원래 QuoteItem은 변경하지 않는다."""
+    groups, extras = {}, []
+    has_freight = any(i.charge_code == "OCEAN_FREIGHT" for i in items)
+    for item in sorted(items, key=lambda i: i.charge_code == "BAF"):
+        row = COST_ROWS.get(item.charge_code)
+        if row is None or (item.charge_code == "BAF" and not has_freight):
+            extras.append(item)
+            continue
+        group = groups.setdefault(row, [])
+        first = group[0] if group else None
+        compatible = first is None or (
+            (first.currency, first.basis, first.qty) == (item.currency, item.basis, item.qty)
+            and item.qty is not None and item.qty > 0
+            and all(i.rate is not None and i.amount is not None for i in (first, item))
+            and item.basis not in ("PERCENT", "AT_COST")
         )
+        (group if compatible else extras).append(item)
+    return groups, extras
+
+
+def extra_charge_text(item, lang):
+    name = "Handling Charge" if item.charge_code == "HANDLING" else item.charge_label
+    amount = f"{item.currency}{item.amount:,.2f}" if item.amount is not None else "AT COST"
+    calc = (f"{item.currency}{item.rate:,.2f} {BASIS_LABEL.get(item.basis, item.basis)} x {_fmt_num(item.qty)} = "
+            if item.rate is not None and item.qty is not None else "")
+    included = ("TOTAL 포함" if lang == "ko" else "included in TOTAL") if item.amount is not None else (
+        "실비 별도 / TOTAL 미포함" if lang == "ko" else "at cost / excluded from TOTAL")
+    return f"* {name}: {calc}{amount} ({included})"
 
 
 def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: str | None = None,
                 schedule_unconfirmed: bool = False) -> bytes:
-    """발주 측 양식(견적서_양식.xlsx)에 채운다. 머리글·표 제목은 예시 견적서(LCL·FOB PDF)를 따른다."""
+    """발주 측 XLSX의 고정 비용 12행·도형·행 높이·병합을 그대로 두고 값만 채운다."""
     qi = case.quote_input
     items = quote.items
-    if len(items) > ITEM_LAST_ROW - ITEM_FIRST_ROW + 1:
-        raise ValueError(f"비용 항목이 양식 칸(12개)보다 많습니다: {len(items)}개")
-
     wb = load_workbook(settings.quote_template)
     ws = wb.active
     is_lcl = qi.containerType == "LCL"
-    # FOB 예시(수출): 국내 비용만 내므로 POL만 표기. 수입 FOB는 해상운임·도착지 비용이 들어가므로 구간(POL - POD)을 적는다
-    is_fob_fcl = qi.incoterms == "FOB" and not is_lcl and trade_role(qi) == EXPORT
 
     # 인쇄: 양식의 인쇄 범위(A:F)를 한 페이지 폭에 맞춘다 — 없으면 회사 주소·DATE·REMARK(F열)가 2쪽으로 밀린다
     ws.sheet_properties.pageSetUpPr.fitToPage = True
@@ -631,86 +765,85 @@ def render_xlsx(case: Case, quote: Quote, count: int | None = None, count_note: 
     t = TEXT[lang]
     ws["B9"] = recipient_line(case, lang)
     ws["B10"] = t["from"]
-    ws["B12"] = t["subject"].format(case_id=case.case_id)
-    for ref, key in (("B14", "greeting1"), ("B15", "greeting2"), ("B48", "thanks"), ("F49", "seal")):
-        if t[key]:
+    # 영문 생성본의 문구만 바꾸며 글꼴·배치·원본 파일은 그대로 둔다. ko는 원본 셀을 유지한다.
+    if lang == "en":
+        for ref, key in (("B12", "subject"), ("B14", "greeting1"), ("B15", "greeting2"),
+                         ("B48", "thanks"), ("F49", "seal")):
             ws[ref] = t[key]
-    _box(ws, 12, "B", "D")  # 양식의 Subject 상자는 도형이라 저장 시 빠진다(openpyxl) → 셀 테두리로 대신 그린다
+    # 케이스 번호는 하단 Remark에만 넣는다.
 
     size = f" / {qi.boxL} X {qi.boxW} X {qi.boxH}MM" if None not in (qi.boxL, qi.boxW, qi.boxH) else ""
     cbm = f" / {_fmt_num(qi.totalCbm)}CBM" if qi.totalCbm is not None else ""
     cargo = f": {qi.qty} {qi.qtyUnit}{size} / {_fmt_num(qi.grossWeightKg)}KGS{cbm}"
-    if is_fob_fcl:
-        country = COUNTRY.get((qi.pol or "")[:2])
-        ws["B17"] = "** POL"
-        ws["C17"] = f": {port_label(qi.pol)}{', ' + country if country else ''}"
-        ws["C18"] = ": BY CONTAINER SHIPMENT"
-        ws["B19"] = "** REQUIRED CNTR"
-        ws["C19"] = f": {qi.containerType}' X {count or 1}"
-        headers = ("CONTAINER", "Q/T", "TOTAL")
+    ws["C17"] = f": {port_label(qi.pol)} - {port_label(qi.pod)}"
+    if is_lcl:
+        ws["C18"] = ": BY CONTAINER SHIPMENT (LCL)"
+        rt = next((i.qty for i in items if i.basis == "PER_RT" and i.qty is not None), None)
+        ws["C19"] = cargo + (t["rt_basis"].format(rt=_fmt_num(rt)) if rt is not None else "")
+        ws["D22"] = "R/T"
     else:
-        ws["C17"] = f": {port_label(qi.pol)} - {port_label(qi.pod)}"
-        if is_lcl:
-            ws["C18"] = ": BY CONTAINER SHIPMENT (LCL)"
-            rt = next((i.qty for i in items if i.basis == "PER_RT" and i.qty), None)
-            ws["C19"] = cargo + (t["rt_basis"].format(rt=_fmt_num(rt)) if rt else "")
-            headers = ("RATE", "R/T", "AMOUNT")
-        else:
-            ws["C18"] = f": BY CONTAINER SHIPMENT ({qi.containerType} X {count or 1})"
-            ws["C19"] = cargo
-            headers = ("RATE", "Q'TY", "AMOUNT")
+        ws["C18"] = f": BY CONTAINER SHIPMENT ({qi.containerType} X {count or 1})"
+        ws["C19"] = cargo
+        ws["D22"] = "20FT" if (qi.containerType or "").startswith("20") else qi.containerType
     ws["C20"] = f": {qi.incoterms}"  # 발주 측 양식은 이 줄(PAYMENT TERM)에 인코텀즈를 적는다 (예시 견적서 기준)
-    ws["F21"] = f"DATE : {kst(quote.created_at):%Y. %m. %d}" if quote.created_at else "DATE :"
-    ws["E21"] = None
-    ws["C22"], ws["D22"], ws["E22"] = headers
+    ws["F21"] = f"{kst(quote.created_at):%Y-%m-%d}" if quote.created_at else ""
 
     for row in range(ITEM_FIRST_ROW, ITEM_LAST_ROW + 1):
-        for col in "BCDEF":
+        for col in "CDEF":
             ws[f"{col}{row}"] = None
-    for row, item in zip(range(ITEM_FIRST_ROW, ITEM_LAST_ROW + 1), items):
-        ws[f"B{row}"] = item.charge_label
+    groups, extras = display_groups(items)
+    for row, group in groups.items():
+        item = group[0]
         if item.basis == "PERCENT" and item.amount is not None:  # 화물가액 % (산정식은 비고 칸)
             ws[f"E{row}"] = item.amount
             ws[f"E{row}"].number_format = MONEY_FORMAT.get(item.currency, "#,##0.00")
         elif item.basis == "AT_COST" or item.rate is None:
-            ws.merge_cells(f"C{row}:E{row}")  # FOB 예시처럼 단가~금액 칸을 합쳐 AT COST
-            ws[f"C{row}"] = "AT COST"
-            ws[f"C{row}"].alignment = Alignment(horizontal="center", vertical="center")
+            ws[f"E{row}"] = "AT COST"
         else:
-            ws[f"C{row}"] = item.rate
+            ws[f"C{row}"] = sum(i.rate for i in group)
             ws[f"C{row}"].number_format = MONEY_FORMAT.get(item.currency, "#,##0.00")
             ws[f"D{row}"] = item.qty
-            ws[f"E{row}"] = item.amount
+            ws[f"E{row}"] = money(sum(i.amount for i in group), item.currency)
             ws[f"E{row}"].number_format = MONEY_FORMAT.get(item.currency, "#,##0.00")
-        ws[f"F{row}"] = item_remark(item, lang)
-    for row in range(ITEM_FIRST_ROW + len(items), ITEM_LAST_ROW + 1):
-        ws.row_dimensions[row].hidden = True  # 쓰지 않은 비용 줄은 숨긴다 (예시처럼 쓴 줄만 보이게)
+        if len(group) == 1:
+            ws[f"F{row}"] = item_remark(item, lang)
+        else:
+            ws[f"F{row}"] = "\n".join(
+                f"{BREAKDOWN_LABELS.get(i.charge_code, i.charge_code)} {i.currency}{i.rate:,.2f} {BASIS_LABEL.get(i.basis, i.basis)}"
+                for i in group)
+            font = copy(ws[f"F{row}"].font)
+            font.sz = 8.5
+            ws[f"F{row}"].font = font
     ws[f"C{TOTAL_ROW}"] = total_text(quote)
 
     as_of = qi.exchangeRateAsOf or (f"{kst(quote.created_at):%Y-%m-%d}" if quote.created_at else "-")
-    remarks = [t["fx"].format(currency=qi.quoteCurrency or "USD", as_of=as_of), t["subject_to_change"]]
+    # 통화코드 단일 필드와 계산은 유지하고, 고지에는 실제 합계의 통화를 모두 표시한다 (FR-508).
+    currencies = sorted({total.currency for total in quote.totals}, key=lambda c: (c != "USD", c))
+    currency_notice = " / ".join(currencies) or qi.quoteCurrency or "USD"
+    remarks = [t["fx"].format(currency=currency_notice, as_of=as_of), t["subject_to_change"]]
     if schedule_unconfirmed:
         remarks.append(t["schedule_tbc"].format(carrier=f" ({quote.carrier})" if quote.carrier else ""))
-    elif quote.etd or quote.eta:
+    else:
         carrier = f" ({quote.carrier})" if quote.carrier else ""
-        remarks.append(f"* ETD / ETA : {quote.etd or '-'} / {quote.eta or '-'}{carrier}")
-    elif quote.carrier:
-        remarks.append(t["carrier"].format(carrier=quote.carrier))
-    if qi.transitTime:
-        remarks.append(t["transit"].format(days=qi.transitTime))
-    if qi.freeTimeDet or qi.freeTimeDem:
-        remarks.append(t["free_time"].format(det=qi.freeTimeDet or "-", dem=qi.freeTimeDem or "-"))
+        tbc = "확인 필요" if lang == "ko" else "to be confirmed"
+        remarks.append(f"* ETD / ETA : {quote.etd or tbc} / {quote.eta or tbc}{carrier}")
+    tbc = "확인 필요" if lang == "ko" else "to be confirmed"
+    remarks.append(t["transit"].format(days=qi.transitTime) if qi.transitTime is not None else f"* T/T : {tbc}")
+    det = f"{qi.freeTimeDet}{'일' if lang == 'ko' else ' days'}" if qi.freeTimeDet is not None else tbc
+    dem = f"{qi.freeTimeDem}{'일' if lang == 'ko' else ' days'}" if qi.freeTimeDem is not None else tbc
+    remarks.append(f"* FREE TIME : DET {det} / DEM {dem}")
     if count_note:
         remarks.append(f"* {count_note_text(count_note, lang)}")
     remarks.extend(incoterm_remarks(qi.incoterms, lang))
     remarks.append(t["validity"].format(date=_korean_date(quote.valid_until) if lang == "ko" else quote.valid_until or ""))
     remarks.append(t["quote_no"].format(case_id=case.case_id, version=quote.version_no))
+    remarks.extend(extra_charge_text(item, lang) for item in extras)
+    if len(remarks) > REMARK_LAST_ROW - REMARK_FIRST_ROW + 1:
+        raise QuoteGenerationError("원본 양식의 Remark 공간이 부족합니다. 비용이나 필수 안내를 생략할 수 없어 담당자 확인이 필요합니다.")
     for offset, row in enumerate(range(REMARK_FIRST_ROW, REMARK_LAST_ROW + 1)):
         ws[f"B{row}"] = remarks[offset] if offset < len(remarks) else None
 
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    return buffer.getvalue()
+    return save_filled_template(wb, settings.quote_template)
 
 
 def _save(case: Case, quote: Quote, ext: str, data: bytes) -> str:
@@ -734,7 +867,9 @@ def retire_files(case: Case, version: int) -> list[str]:
         history = settings.storage_dir / case.case_id / "quote-history"
         history.mkdir(parents=True, exist_ok=True)
         target = history / f"{case.case_id}_견적서_v{version}.{ext}"
-        os.replace(current, target)  # 같은 이름이 있으면 덮어쓴다 (Windows 포함)
+        if target.exists():
+            target = history / f"{case.case_id}_견적서_v{version}_{uuid.uuid4().hex[:8]}.{ext}"
+        os.replace(current, target)
         moved.append(target.name)
     return moved
 
@@ -752,53 +887,92 @@ _WINDOWS_SOFFICE = (
     r"C:\Program Files\LibreOffice\program\soffice.exe",
     r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
 )
+_MACOS_SOFFICE = (
+    "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+    "~/Applications/LibreOffice.app/Contents/MacOS/soffice",
+)
 
 
 def find_soffice() -> str | None:
+    """명시한 경로 → PATH → 운영체제별 기본 설치 경로. 잘못된 명시 경로는 자동 대체하지 않는다."""
     if settings.soffice_path:
-        return settings.soffice_path if Path(settings.soffice_path).exists() else None
+        configured = Path(settings.soffice_path).expanduser()
+        return str(configured) if configured.is_file() else None
     found = shutil.which("soffice") or shutil.which("libreoffice")
     if found:
         return found
-    return next((p for p in _WINDOWS_SOFFICE if os.path.exists(p)), None)
+    defaults = _MACOS_SOFFICE if sys.platform == "darwin" else _WINDOWS_SOFFICE
+    for candidate in defaults:
+        path = Path(candidate).expanduser()
+        if path.is_file():
+            return str(path)
+    return None
+
+
+def _validate_pdf(data: bytes) -> None:
+    """파일 확장자나 헤더만 믿지 않고 페이지·내용 스트림까지 읽을 수 있는지 확인한다."""
+    if not data.startswith(b"%PDF-"):
+        raise ValueError("PDF header missing")
+    reader = PdfReader(BytesIO(data), strict=True)
+    if reader.is_encrypted or not reader.pages:
+        raise ValueError("PDF is encrypted or has no pages")
+    for page in reader.pages:
+        contents = page.get_contents()
+        if contents is not None:
+            contents.get_data()
 
 
 def to_pdf(xlsx: bytes) -> tuple[bytes | None, str | None]:
     """양식 XLSX → PDF. LibreOffice가 있으면 그것으로, 없거나 실패하면 내장 엔진(quote_pdf)으로 만든다.
 
-    둘 다 실패하면 (None, 사유) — 견적서 XLSX는 그대로 쓴다.
+    둘 다 실패하면 (None, 사유) — build가 두 파일의 송부를 함께 보류한다.
     """
     pdf, reason = _soffice_pdf(xlsx)
     if pdf:
         return pdf, None
     try:
-        from . import quote_pdf  # reportlab이 없어도 견적(XLSX)은 계속 만들 수 있게 여기서 불러온다
+        from . import quote_pdf
 
-        return quote_pdf.render_pdf(xlsx), f"{reason} — 내장 엔진으로 PDF를 만들었습니다"
-    except Exception as error:  # noqa: BLE001 — PDF 때문에 견적이 실패하면 안 된다
+        pdf = quote_pdf.render_pdf(xlsx)
+        _validate_pdf(pdf)
+        return pdf, f"{reason} — 내장 엔진으로 PDF를 만들었습니다"
+    except Exception as error:  # noqa: BLE001 — 검증 결과에 실패 원인을 전달한다
         log.warning("builtin pdf failed: %s", error)
-        return None, f"{reason}, 내장 엔진도 실패 ({error.__class__.__name__}) — XLSX만 생성"
+        return None, f"{reason}, 내장 엔진도 실패 ({error.__class__.__name__}) — PDF·XLSX 송부 보류"
 
 
 def _soffice_pdf(xlsx: bytes) -> tuple[bytes | None, str | None]:
     """LibreOffice 변환. 못 만들면 (None, 사유)."""
     soffice = find_soffice()
     if soffice is None:
-        return None, "LibreOffice 없음"
-    with tempfile.TemporaryDirectory(prefix="leona-pdf-") as tmp:
-        src = Path(tmp) / "quote.xlsx"
-        src.write_bytes(xlsx)
-        profile = (Path(tmp) / "profile").as_uri()  # 담당자가 LibreOffice를 켜 둬도 충돌하지 않게 별도 프로필
-        try:
-            subprocess.run(
+        return None, "LibreOffice 실행 파일 없음 — 설치 경로 또는 SOFFICE_PATH 설정을 확인해 주세요"
+    try:
+        with tempfile.TemporaryDirectory(prefix="leona-pdf-") as tmp:
+            src = Path(tmp) / "quote.xlsx"
+            src.write_bytes(xlsx)
+            profile = (Path(tmp) / "profile").as_uri()  # 담당자가 LibreOffice를 켜 둬도 충돌하지 않게 별도 프로필
+            result = subprocess.run(
                 [soffice, "--headless", "--norestore", f"-env:UserInstallation={profile}",
                  "--convert-to", "pdf", "--outdir", tmp, str(src)],
                 capture_output=True, timeout=settings.pdf_timeout_s, check=False,
             )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            log.warning("pdf conversion failed: %s", error)
-            return None, f"LibreOffice 변환 실패 ({error.__class__.__name__})"
-        out = Path(tmp) / "quote.pdf"
-        if not out.exists():
-            return None, "LibreOffice 변환 결과 없음"
-        return out.read_bytes(), None
+            if result.returncode != 0:
+                return None, (f"LibreOffice 변환 실패 (종료 코드 {result.returncode}) — "
+                              "LibreOffice 설치 상태와 실행 권한을 확인해 주세요")
+            out = Path(tmp) / "quote.pdf"
+            if not out.is_file():
+                return None, "LibreOffice 변환 결과 없음 — PDF 파일이 생성되지 않았습니다"
+            pdf = out.read_bytes()
+            try:
+                _validate_pdf(pdf)
+            except Exception as error:  # noqa: BLE001 — 손상된 변환 결과는 송부하지 않는다
+                log.warning("invalid LibreOffice PDF: %s", error.__class__.__name__)
+                return None, "LibreOffice PDF 오류 — 파일이 손상되었거나 읽을 수 있는 페이지가 없습니다"
+            return pdf, None
+    except subprocess.TimeoutExpired:
+        return None, (f"LibreOffice 변환 시간 초과 ({settings.pdf_timeout_s:g}초) — "
+                      "LibreOffice 실행 상태를 확인해 주세요")
+    except OSError as error:
+        log.warning("pdf conversion or file access failed: %s", error.__class__.__name__)
+        return None, (f"LibreOffice 실행·파일 처리 실패 ({error.__class__.__name__}) — "
+                      "설치 경로와 실행·임시 폴더 접근 권한을 확인해 주세요")

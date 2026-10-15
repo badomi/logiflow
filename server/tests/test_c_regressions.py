@@ -2,18 +2,22 @@
 
 import io
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from openpyxl import Workbook, load_workbook
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app import quotation, rates, services, validation
-from app.models import Rate
+from app.config import settings
+from app.models import Quote, Rate
 from app.seed import seed_containers
-from .test_pipeline_flow import FULL_LCL, TODAY, connect, create, text_mail
+from .test_pipeline_flow import (
+    CLIENT_CASE, FULL_LCL, TODAY, client_rates, connect, create, quote_folder, text_mail,
+)
 
 
-CLIENT_FILE = Path(__file__).resolve().parents[2] / "샘플_요율표.xlsx"
+CLIENT_FILE = Path(__file__).resolve().parents[2] / "docs" / "양식" / "샘플_요율표.xlsx"
 
 
 def save(wb):
@@ -222,3 +226,155 @@ def test_mixed_currency_recalculation_holds_case_and_retires_old_quote(session, 
     assert result["status"] == "보류" and result["quote"] is None
     assert any("통화가 서로 다릅니다" in item["message"] for item in result["hold"])
     assert not original_file.exists() and result["quoteRetired"]
+
+
+INSURANCE_CASE = CLIENT_CASE.format(carrier="선사: HMM\n").replace("2026-10-05", "2026-10-20")
+
+
+def insurance_rows(session):
+    rows = session.scalars(select(Rate).where(
+        Rate.charge_code.in_(quotation.INSURANCE_CODES), Rate.basis == "PERCENT",
+    )).all()
+    assert rows
+    return rows
+
+
+@pytest.mark.parametrize("invoice_currency,rate_currency", [("KRW", "USD"), ("USD", "KRW")])
+def test_insurance_currency_mismatch_holds_before_creating_quote(
+    client, client_rates, session, monkeypatch, invoice_currency, rate_currency,
+):
+    for row in insurance_rows(session):
+        row.currency = rate_currency
+    session.commit()
+
+    def unexpected_render(*args, **kwargs):
+        pytest.fail("보험료 통화 확인 전에 견적서 생성이 호출됨")
+
+    monkeypatch.setattr(quotation, "render_xlsx", unexpected_render)
+    body = INSURANCE_CASE.replace("USD 15,000", f"{invoice_currency} 15,000")
+    case = create(client, text_mail(body))
+    result = case["extraction"]["validation"]
+    assert case["status"] == "보류" and result["quote"] is None
+    assert result["questions"] == []  # 환산 기준은 화주에게 묻지 않고 담당자가 확인한다.
+    assert result["hold"][0]["code"] == "INSURANCE_CURRENCY_MISMATCH"
+    assert result["hold"][0]["severity"] == "Block"
+    message = result["hold"][0]["message"]
+    assert f"인보이스 {invoice_currency}" in message and f"보험요율 {rate_currency}" in message
+    assert "담당자" in message and result["severityCount"]["Block"] == 1
+    assert session.scalar(select(func.count()).select_from(Quote)) == 0
+    assert quote_folder(case["caseId"]) == []
+    assert client.post(f"/api/cases/{case['caseId']}/drafts/quote", json={}).status_code == 400
+
+
+@pytest.mark.parametrize("code", ["INS", "INSURANCE"])
+def test_insurance_calculation_does_not_fall_back_to_at_cost(code):
+    rate = Rate(charge_code=code, basis="PERCENT", currency="USD", rate_pct=0.002, min_amount=30)
+    qi = SimpleNamespace(invoiceValue=15000, ccy="KRW")
+    with pytest.raises(quotation.InsuranceCurrencyError):
+        quotation.percent_amount(rate, qi)
+
+
+def test_insurance_currency_recheck_retires_files_and_recovers(client, client_rates, session):
+    case = create(client, text_mail(INSURANCE_CASE))
+    case_id = case["caseId"]
+    first = case["extraction"]["validation"]["quote"]
+    assert first["version"] == 1 and first["totals"] == {"USD": 963.0}
+    insurance = next(line for line in first["lines"] if line["charge"] == "CARGO INSURANCE")
+    assert insurance["amount"] == 33.0  # 15,000 × 110% × 0.2%
+    ws = load_workbook(settings.storage_dir / first["file"]).active
+    assert ws["E34"].value == 33 and "110%" in ws["F34"].value
+    assert (settings.storage_dir / first["pdf"]).read_bytes().startswith(b"%PDF")
+
+    rows = insurance_rows(session)
+    originals = [(row, row.currency) for row in rows]
+    for row in rows:
+        row.currency = "KRW"
+    session.commit()
+    assert client.post(f"/api/cases/{case_id}/extract", json={}).status_code == 200
+    held = client.get(f"/api/cases/{case_id}").json()
+    result = held["extraction"]["validation"]
+    assert held["status"] == "보류" and result["quote"] is None
+    assert result["hold"][0]["code"] == "INSURANCE_CURRENCY_MISMATCH"
+    assert len(result["quoteRetired"]) == 2 and quote_folder(case_id) == []
+    assert len(quote_folder(case_id, "quote-history")) == 2
+    assert client.post(f"/api/cases/{case_id}/drafts/quote", json={}).status_code == 400
+    assert session.scalar(select(func.count()).select_from(Quote)) == 1
+
+    for row, value in originals:
+        row.currency = value
+    session.commit()
+    assert client.post(f"/api/cases/{case_id}/extract", json={}).status_code == 200
+    recovered = client.get(f"/api/cases/{case_id}").json()
+    quote = recovered["extraction"]["validation"]["quote"]
+    assert recovered["status"] == "계산완료" and quote["version"] == 2
+    assert quote["totals"] == first["totals"] and len(quote_folder(case_id)) == 2
+    draft = client.post(f"/api/cases/{case_id}/drafts/quote", json={}).json()
+    assert sorted(a["filename"] for a in draft["attachments"]) == [f"{case_id}_견적서.pdf", f"{case_id}_견적서.xlsx"]
+
+
+@pytest.mark.parametrize("incoterms,total", [("FOB", 760.0), ("EXW", 930.0)])
+def test_nonapplicable_insurance_does_not_block_quote(client, client_rates, incoterms, total):
+    body = INSURANCE_CASE.replace("조건: CIF", f"조건: {incoterms}").replace("USD 15,000", "KRW 15,000")
+    case = create(client, text_mail(body))
+    result = case["extraction"]["validation"]
+    assert case["status"] == "계산완료" and result["hold"] == []
+    assert result["quote"]["totals"] == {"USD": total}
+    assert all(line["charge"] != "CARGO INSURANCE" for line in result["quote"]["lines"])
+
+
+def test_fixed_insurance_preserves_mixed_currency_quote(client, connect):
+    case = create(client, text_mail(FULL_LCL))  # USD 화물가액 + KRW 정액 보험료
+    result = case["extraction"]["validation"]
+    assert case["status"] == "계산완료" and result["hold"] == []
+    assert result["quote"]["totals"] == {"USD": 500.0, "KRW": 140203.0}
+    insurance = next(line for line in result["quote"]["lines"] if line["charge"] == "INSURANCE FEE")
+    assert (insurance["amount"], insurance["currency"]) == (18000.0, "KRW")
+
+
+@pytest.mark.parametrize("commodity,expected", [
+    (None, []),
+    ("RUBBER GASKET", []),
+    ("GASKETS", []),
+    ("PAINTING", []),
+    ("GAS123", []),
+    ("BIOGAS", []),
+    ("CHEMICALS123", []),
+    ("SPRAYSTONE", []),
+    ("gas cylinder", ["GAS"]),
+    ("(GAS)", ["GAS"]),
+    ("GAS-CYLINDER", ["GAS"]),
+    ("LITHIUM BATTERY", ["BATTERY", "LITHIUM"]),
+    ("lithium batteries", ["BATTERIES", "LITHIUM"]),
+    ("battery-powered equipment", ["BATTERY"]),
+    ("리튬배터리", ["배터리", "리튬"]),
+    ("UN3480", ["UN번호"]),
+    ("un 3480", ["UN번호"]),
+])
+def test_dangerous_goods_english_keywords_are_whole_words(commodity, expected):
+    assert validation.detect_dg(commodity) == expected
+
+
+@pytest.mark.parametrize("plural", [
+    "HAZARDS", "BATTERIES", "FLAMMABLES", "GASES", "AEROSOLS", "SPRAYS",
+    "PAINTS", "CHEMICALS", "ALCOHOLS", "PERFUMES", "EXPLOSIVES", "CORROSIVES",
+])
+def test_dangerous_goods_plural_keywords_are_data_and_case_insensitive(plural):
+    assert validation.detect_dg(f"({plural.lower()})") == [plural]
+
+
+@pytest.mark.parametrize("commodity,held", [
+    ("RUBBER GASKET", False), ("GAS CYLINDER", True),
+    ("Batteries", True), ("Chemicals", True), ("Aerosols", True), ("GASKETS", False),
+])
+def test_dangerous_goods_word_matching_controls_quote_generation(client, client_rates, commodity, held):
+    case = create(client, text_mail(INSURANCE_CASE.replace("자동차 부품", commodity)))
+    result = case["extraction"]["validation"]
+    assert result["questions"] == []
+    if held:
+        assert case["status"] == "보류" and result["quote"] is None
+        assert result["hold"][0]["code"] == "DANGEROUS_GOODS"
+        assert quote_folder(case["caseId"]) == []
+    else:
+        assert case["status"] == "계산완료" and result["hold"] == []
+        assert result["quote"]["totals"] == {"USD": 963.0}
+        assert len(quote_folder(case["caseId"])) == 2
