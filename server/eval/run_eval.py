@@ -75,15 +75,22 @@ def load_mails(case: dict) -> list[MailText]:
 
 
 def same(got, expected) -> bool:
-    if isinstance(expected, (int, float)) and isinstance(got, (int, float)):
-        return abs(got - expected) <= max(0.01, abs(expected) * 0.005)
-    return engine._same(got, expected)
+    """NFR-01: 정규화된 정답 전체를 비교한다. 추출 엔진의 후보 유사도와 채점은 별개다.
+
+    정의서에 없는 숫자 오차율이나 문자열 부분 포함을 정답 인정 기준으로 쓰지 않는다.
+    None은 확정할 정답 없음, bool은 6장 숫자 필드의 값이 아니다.
+    """
+    if type(expected) in (int, float) and type(got) in (int, float):
+        return got == expected
+    if isinstance(expected, str) and isinstance(got, str):
+        return got.strip().casefold() == expected.strip().casefold()
+    return False
 
 
 def evaluate(llm=None, model: str | None = None, cases: list[dict] | None = None, scope: str = "all") -> dict:
     cases_in = cases if cases is not None else all_cases()
     per_field = {f: {"filled": 0, "correct": 0, "expected": 0} for f in FIELDS}
-    errors, cases, times, multi_ok, unparsed = [], [], [], 0, []
+    errors, cases, times, multi_ok, unparsed, multi_errors = [], [], [], 0, [], []
     for case in cases_in:
         result = engine.run(load_mails(case), llm=llm, model_name=model, scope=scope, asked=case.get("asked"))
         times.append(result["elapsedMs"])
@@ -106,7 +113,11 @@ def evaluate(llm=None, model: str | None = None, cases: list[dict] | None = None
             else:
                 errors.append({"case": case["id"], "field": f, "got": got["value"], "expected": want,
                                "evidence": got["evidence"], "method": got["method"], "score": got["score"]})
-        multi_ok += result["multipleItems"] == case.get("multipleItems", False)
+        expected_multi = case.get("multipleItems", False)
+        if result["multipleItems"] == expected_multi:
+            multi_ok += 1
+        else:
+            multi_errors.append({"case": case["id"], "got": result["multipleItems"], "expected": expected_multi})
         cases.append({"id": case["id"], "desc": case["desc"], "filled": c_filled, "correct": c_correct,
                       "expected": sum(v is not None for v in expected.values()), "ms": result["elapsedMs"],
                       "llm": result["llm"], "multi": result["multipleItems"]})
@@ -117,7 +128,8 @@ def evaluate(llm=None, model: str | None = None, cases: list[dict] | None = None
     return {
         "precision": correct / filled if filled else 0.0, "coverage": correct / expected if expected else 0.0,
         "filled": filled, "correct": correct, "expectedTotal": expected, "perField": per_field, "cases": cases,
-        "errors": errors, "unparsed": unparsed, "multiAccuracy": multi_ok / len(cases_in), "caseCount": len(cases_in),
+        "errors": errors, "unparsed": unparsed, "multiErrors": multi_errors,
+        "multiAccuracy": multi_ok / len(cases_in), "caseCount": len(cases_in),
         "msMedian": statistics.median(times), "msMax": max(times),
     }
 
@@ -127,12 +139,15 @@ def report(r: dict, mode: str, model: str | None) -> str:
     lines = [
         f"# 추출 정밀도 측정 — {mode}{f' ({model})' if model else ''}",
         f"측정 시각: {datetime.now():%Y-%m-%d %H:%M} · 평가 세트 {r['caseCount']}건 (eval/dataset.py + eval/cases/) · 사전 {engine.dictionary()['version']}",
+        "채점: 문자열은 앞뒤 공백·대소문자 정리 후 전체 일치, 숫자는 정규화된 값 일치. 부분 포함·숫자 오차율로 정답을 인정하지 않는다.",
+        "미추출·검토 필요는 오추출에 포함하지 않는다. 정답 없음(None)에 자동으로 채운 값은 오추출이다 (NFR-01·FR-202).",
         "",
         "| 지표 | 값 | 기준 |", "|---|---|---|",
         f"| **정밀도** (맞게 채움 / 채움) | **{pct(r['precision'])}** ({r['correct']}/{r['filled']}) | NFR-01 90% 이상 |",
         f"| 채움률 (맞게 채움 / 정답 있음) | {pct(r['coverage'])} ({r['correct']}/{r['expectedTotal']}) | 높을수록 보완 요청 감소 |",
         f"| 다품목 판정 정확도 | {pct(r['multiAccuracy'])} | FR-210 |",
         f"| 처리 시간 (중앙값 / 최대) | {r['msMedian'] / 1000:.2f}s / {r['msMax'] / 1000:.2f}s | NFR-02 60초 |",
+        "", "시간은 추출 엔진 구간만 측정한다. 메일 수집·검증·견적 생성·DB 저장을 포함한 전체 성능 통과를 뜻하지 않는다.",
         "", "## 필드별", "| 필드 | 정밀도 | 채움률 | 채움 | 정답 있음 |", "|---|---|---|---|---|",
     ]
     for f, v in r["perField"].items():
@@ -151,6 +166,13 @@ def report(r: dict, mode: str, model: str | None) -> str:
         for e in r["errors"]:
             lines.append(f"| {e['case']} | {e['field']} | {e['got']} | {e['expected']} | {e['method']} {e['score']} | "
                          f"{(e['evidence'] or '').replace('|', '/')[:60]} |")
+    lines += ["", "## 다품목 판정 불일치 (FR-210, 필드 정밀도와 별도)"]
+    if not r["multiErrors"]:
+        lines.append("없음")
+    else:
+        lines += ["| 케이스 | 판정 | 정답 |", "|---|---|---|"]
+        for e in r["multiErrors"]:
+            lines.append(f"| {e['case']} | {e['got']} | {e['expected']} |")
     lines += ["", "## 찾았지만 읽지 못한 값 (저장 안 함 → 원문을 짚어 확인 질문, 사전 보강 후보)"]
     if not r["unparsed"]:
         lines.append("없음")

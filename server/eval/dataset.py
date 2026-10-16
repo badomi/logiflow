@@ -1,9 +1,9 @@
 """정밀도 측정(NFR-01) 평가 세트 — 메일과 필드별 정답.
 
 - 'eml'은 발주 측 샘플(server/samples/eml), 나머지는 B트랙 입력 특성을 담아 직접 만든 변형 메일이다.
-- 정답(expected)에 없는 필드는 '메일에 없음(None)'이 정답이다 → 시스템이 채우면 오추출로 센다.
-- 값 기준: 6장 형식(단위 환산 후). 메일에 적혔지만 애매한 값(단위 없는 규격 등)도 실제 값을 정답으로 둔다
-  — 시스템이 안 채우면 정밀도에는 영향 없고 채움률만 떨어진다(정의서: 미추출은 오류가 아니라 보완 요청).
+- 정답(expected)에 없거나 None인 필드는 원문에서 값을 확정할 수 없다 → 자동으로 채우면 오추출로 센다.
+- 값 기준: FR-202·203 및 6장 형식(단위 환산 후). 단위·연도 등 근거가 부족한 값은 추측해 정답으로 두지 않는다.
+- 미추출·검토 필요 값은 정밀도 분모에서 제외한다(NFR-01). 정답이 확정된 값만 채움률 분모에 포함한다.
 - 발주 측 샘플을 바탕으로 한 자료이므로 외부 재배포 금지.
 """
 
@@ -129,7 +129,7 @@ LCL 견적 요청드립니다.
 최서연 드림"""}],
      "expected": {"commodity": "김 스낵", "qty": 800, "qtyUnit": "CTNS", "packing": "Carton", "boxL": 400, "boxW": 300,
                   "boxH": 250, "pol": "KRPUS", "pod": "SGSIN", "incoterms": "FOB", "containerType": "20FT GP",
-                  "grossWeightKg": 6000, "invoiceValue": 20000, "ccy": "USD", "contactName": "최서연",
+                  "grossWeightKg": 6000, "invoiceValue": 20000, "ccy": "USD", "customerName": "그린푸드", "contactName": "최서연",
                   "contactEmail": "seoyeon@greenfood.kr"}},
 
     {"id": "V06", "desc": "영문 DDP + Gmail 영문 인용 회신, 회신에서 중량 정정(문장형)",
@@ -256,8 +256,9 @@ Thanks
 Kevin Park
 Export Manager
 K Furniture Inc."""}],
-     "expected": {"commodity": "Furniture Parts", "qty": 15, "qtyUnit": "CRATES", "packing": "Crate", "boxL": 1200,
-                  "boxW": 800, "boxH": 900, "totalCbm": 12.96, "pol": "KRINC", "pod": "AUMEL", "cargoReadyDate": "2026-11-30",
+     # FR-202·203: 규격의 단위가 없으므로 1200/800/900을 mm 값이라고 확정하지 않는다.
+     "expected": {"commodity": "Furniture Parts", "qty": 15, "qtyUnit": "CRATES", "packing": "Crate", "boxL": None,
+                  "boxW": None, "boxH": None, "totalCbm": 12.96, "pol": "KRINC", "pod": "AUMEL", "cargoReadyDate": "2026-11-30",
                   "incoterms": "CIF", "grossWeightKg": 3200, "customerName": "K Furniture Inc.", "contactName": "Kevin Park",
                   "contactEmail": "kevin@k-furniture.com"}},
 
@@ -405,9 +406,9 @@ CASES += [
 
 감사합니다.
 최서연 드림"""}],
-     # 연도 없는 '10월 20일'은 측정일 기준 다가오는 날로 추정한다 (2026-10-27 이후에 재면 2027년이 되어 틀림으로 셈)
+     # FR-202·6장: 연도와 이를 확정할 메일 기준일이 없어 ISO 날짜를 특정 연도로 단정하지 않는다.
      "expected": {"commodity": "노트", "qty": 10, "qtyUnit": "CTNS", "packing": "Carton", "boxL": 310, "boxW": 450,
-                  "boxH": 270, "pol": "KRPUS", "pod": "SGSIN", "cargoReadyDate": "2026-10-20", "incoterms": "CIF",
+                  "boxH": 270, "pol": "KRPUS", "pod": "SGSIN", "cargoReadyDate": None, "incoterms": "CIF",
                   "containerType": "LCL", "grossWeightKg": 500, "invoiceValue": 3000, "ccy": "USD",
                   "paymentTerm": "T/T 30% Advance", "customerName": "그린오피스", "contactName": "최서연",
                   "contactEmail": "seoyeon@greenoffice.kr"}},
@@ -466,7 +467,7 @@ def all_cases() -> list[dict]:
     eval/cases/<이름>.json 형식:
       {"id": "T01", "desc": "설명", "mails": [{"file": "T01.eml"}, {"file": "T01_reply.eml", "role": "REPLY"}],
        "expected": {"commodity": "…", "qty": 10, …}, "multipleItems": false}
-    file은 json과 같은 폴더 기준. expected에 없는 필드는 '메일에 없음'이 정답.
+    file은 json과 같은 폴더 기준. expected에 없거나 None인 필드는 원문에서 값을 확정할 수 없음.
     """
     extra = []
     for path in sorted(CASES_DIR.glob("*.json")):
