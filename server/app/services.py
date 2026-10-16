@@ -3,20 +3,23 @@
 import base64
 import binascii
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 
-from sqlalchemy import select
+from sqlalchemy import case as sql_case, func, select
 from sqlalchemy.orm import Session
 
 from . import pipeline, storage
 from .case_id import find_case_ids, issue_case_id
+from .config import KST
 from .mail_parser import AttachmentFile, ParsedMail, parse_eml
-from .models import Attachment, Case, CaseEvent, Mail
+from .models import CASE_STATUSES, Attachment, Case, CaseEvent, Mail, QuoteInput
 from .schemas import (
     Address,
     AttachmentInfo,
     CaseDetail,
     CaseSummary,
+    CaseSearchItem,
+    CaseSearchResult,
     EventOut,
     ExtractionState,
     FileLink,
@@ -263,6 +266,71 @@ def attachment_path(session: Session, case_id: str, attachment_id: int):
 def list_cases(session: Session, limit: int) -> list[CaseSummary]:
     cases = session.scalars(select(Case).order_by(Case.id.desc()).limit(limit))
     return [_summary(c) for c in cases]
+
+
+def search_cases(
+    session: Session, *, status: str = "", customer: str = "", pol: str = "", pod: str = "",
+    start_date: date | None = None, end_date: date | None = None,
+    sort: str = "createdAt", order: str = "desc", page: int = 1, page_size: int = 20,
+) -> CaseSearchResult:
+    """FR-601: 전체 케이스 검색. 읽기 전용이며 기존 최근 목록/회신 선택 경로와 분리한다."""
+    from .extraction.parsers import port_code
+
+    status, customer = status.strip(), customer.strip()
+    if status and status not in CASE_STATUSES:
+        raise InputError("정의된 케이스 상태를 선택해 주세요.")
+    if start_date and end_date and start_date > end_date:
+        raise InputError("검색 시작일은 종료일보다 늦을 수 없습니다.")
+    filters = []
+    if status:
+        filters.append(Case.status == status)
+    if customer:
+        # %, _도 고객명 자체로 검색한다. SQL 문자열을 직접 조립하지 않는다.
+        filters.append(func.lower(QuoteInput.customerName).contains(customer.lower(), autoescape=True))
+    for column, value in [(QuoteInput.pol, pol), (QuoteInput.pod, pod)]:
+        value = value.strip()
+        if value:
+            filters.append(func.upper(column) == (port_code(value) or value.upper()))
+    try:
+        if start_date:
+            filters.append(Case.created_at >= datetime.combine(start_date, time.min, KST).astimezone(timezone.utc))
+        if end_date:
+            filters.append(Case.created_at <= datetime.combine(end_date, time.max, KST).astimezone(timezone.utc))
+    except (OverflowError, ValueError) as error:
+        raise InputError("검색 날짜 범위를 확인해 주세요.") from error
+
+    total = session.scalar(
+        select(func.count(Case.id)).outerjoin(QuoteInput, QuoteInput.case_pk == Case.id).where(*filters)
+    ) or 0
+    # 삭제/필터 변경으로 페이지가 범위를 벗어나도 마지막 유효 페이지로 돌려준다.
+    page = min(page, max(1, (total + page_size - 1) // page_size))
+    first_mail = select(func.min(Mail.id)).where(Mail.case_pk == Case.id).correlate(Case).scalar_subquery()
+    columns = {
+        "createdAt": Case.created_at, "customerName": func.lower(QuoteInput.customerName),
+        "pol": QuoteInput.pol, "pod": QuoteInput.pod,
+        "status": sql_case({s: i for i, s in enumerate(CASE_STATUSES)}, value=Case.status, else_=len(CASE_STATUSES)),
+    }
+    if sort not in columns or order not in ("asc", "desc"):
+        raise InputError("검색 정렬 조건을 확인해 주세요.")
+    column = columns[sort]
+    ordered = column.asc() if order == "asc" else column.desc()
+    statement = (
+        select(Case.case_id, Case.status, Case.created_at, QuoteInput.customerName, QuoteInput.pol,
+               QuoteInput.pod, Mail.subject, Mail.from_email)
+        .outerjoin(QuoteInput, QuoteInput.case_pk == Case.id)
+        .outerjoin(Mail, Mail.id == first_mail)
+        .where(*filters)
+        # 값 없는 항목은 뒤로, 같은 값은 ID로 고정하여 페이지 중복/누락을 방지한다.
+        .order_by(sql_case((column.is_(None), 1), else_=0), ordered,
+                  Case.id.asc() if order == "asc" else Case.id.desc())
+        .offset((page - 1) * page_size).limit(page_size)
+    )
+    items = [CaseSearchItem(
+        case_id=r.case_id, status=r.status, created_at=_as_utc(r.created_at),
+        customer_name=r.customerName, pol=r.pol, pod=r.pod,
+        subject=r.subject or "", from_email=r.from_email or "",
+    ) for r in session.execute(statement)]
+    return CaseSearchResult(items=items, total=total, page=page, page_size=page_size, statuses=list(CASE_STATUSES))
 
 
 def case_detail(case: Case) -> CaseDetail:

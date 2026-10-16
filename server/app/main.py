@@ -5,6 +5,8 @@ API 문서(자동 생성): http://localhost:8000/docs
 """
 
 from contextlib import asynccontextmanager
+from datetime import date
+from typing import Literal
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +20,7 @@ from .schemas import (
     ActorRequest,
     CaseDetail,
     CaseSummary,
+    CaseSearchResult,
     CreateCaseResult,
     DraftOut,
     MailEventRequest,
@@ -108,6 +111,26 @@ def get_case(case_id: str, session: Session = Depends(get_session)):
     try:
         return services.case_detail(services.get_case(session, case_id))
     except services.NotFoundError as error:
+        raise _http_error(error) from error
+
+
+@app.get("/api/dtrack/cases", response_model=CaseSearchResult)
+def search_cases(
+    status: str = Query("", max_length=20), customer: str = Query("", max_length=300),
+    pol: str = Query("", max_length=100), pod: str = Query("", max_length=100),
+    start_date: date | None = Query(None, alias="startDate"),
+    end_date: date | None = Query(None, alias="endDate"),
+    sort: Literal["createdAt", "customerName", "status", "pol", "pod"] = "createdAt",
+    order: Literal["asc", "desc"] = "desc", page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100, alias="pageSize"),
+    session: Session = Depends(get_session),
+):
+    """FR-601 D콘솔 검색. 기간은 KST 케이스 등록일 기준이며 DB에 쓰지 않는다."""
+    try:
+        return services.search_cases(session, status=status, customer=customer, pol=pol, pod=pod,
+                                     start_date=start_date, end_date=end_date, sort=sort, order=order,
+                                     page=page, page_size=page_size)
+    except services.InputError as error:
         raise _http_error(error) from error
 
 

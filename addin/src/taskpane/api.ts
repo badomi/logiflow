@@ -182,3 +182,52 @@ export function getCase(caseId: string) {
 export function listCases() {
   return request<CaseSummary[]>("GET", "/cases?limit=30");
 }
+
+/** D콘솔 조회 전용. A의 최근 케이스 선택/초안 API 계약은 유지한다. */
+export interface CaseSearchFilters {
+  status: string;
+  customer: string;
+  pol: string;
+  pod: string;
+  startDate: string;
+  endDate: string;
+  sort: string;
+  order: string;
+}
+
+export interface CaseSearchItem extends CaseSummary {
+  customerName: string | null;
+  pol: string | null;
+  pod: string | null;
+}
+
+export interface CaseSearchResult {
+  items: CaseSearchItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+  statuses: string[];
+}
+
+export interface CaseField {
+  field: string;
+  value: unknown;
+  status: string;
+  score: number;
+  evidence: string | null;
+  origin: string | null;
+  method: string | null;
+  candidate: unknown;
+}
+
+export function searchCases(filters: CaseSearchFilters, page = 1) {
+  const params = new URLSearchParams({ page: String(page), pageSize: "20" });
+  for (const [key, value] of Object.entries(filters)) {
+    if (value.trim()) params.set(key, value.trim());
+  }
+  return request<CaseSearchResult>("GET", `/dtrack/cases?${params.toString()}`);
+}
+
+export function getCaseFields(caseId: string) {
+  return request<CaseField[]>("GET", `/cases/${encodeURIComponent(caseId)}/fields`);
+}

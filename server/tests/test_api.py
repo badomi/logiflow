@@ -2,9 +2,14 @@
 
 import base64
 import re
+from datetime import datetime, timezone
+
+import pytest
+from sqlalchemy import func, select
 
 from app import pipeline
 from app.config import settings
+from app.models import CASE_STATUSES, Case, CaseEvent, Mail, QuoteInput
 
 from .conftest import sample
 
@@ -241,3 +246,104 @@ def test_eml_reader_import(capsys):
     assert main([str(SAMPLES), "--import"]) == 0
     lines = capsys.readouterr().out.strip().splitlines()
     assert len(lines) == 6 and all(re.search(r"LQ-\d{4}-\d{4}-\d{3}", line) for line in lines)
+
+
+def _console_case(session, number, *, customer="테스트무역", status="수신", pol="CNSHA", pod="KRPUS", when=None):
+    """D콘솔 테스트 자료: 실제 원문/요율/LLM을 사용하지 않는다."""
+    case = Case(case_id=f"LQ-2026-1016-{number:03d}", status=status,
+                created_at=when or datetime(2026, 10, 16, tzinfo=timezone.utc))
+    if customer is not None:
+        case.quote_input = QuoteInput(customerName=customer, pol=pol, pod=pod)
+    case.mails.append(Mail(role="ORIGINAL", source="EML", subject=f"요청 {number}", from_email="customer@example.com"))
+    session.add(case)
+    return case
+
+
+def test_dtrack_search_all_pages_and_unextracted_cases(client, session):
+    for n in range(1, 206):
+        case = _console_case(session, n, customer=None if n == 205 else "테스트무역")
+        if n == 1:
+            case.mails.append(Mail(role="REPLY", source="EML", subject="두 번째 메일"))
+    session.commit()
+    ids = []
+    for page in range(1, 4):
+        response = client.get("/api/dtrack/cases", params={"pageSize": 100, "page": page, "order": "asc"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 205 and data["statuses"] == list(CASE_STATUSES)
+        ids += [c["caseId"] for c in data["items"]]
+        if page == 1:
+            assert data["items"][0]["subject"] == "요청 1"
+        if page == 3:
+            assert data["items"][-1]["customerName"] is None
+    assert len(ids) == len(set(ids)) == 205
+    assert ids == [f"LQ-2026-1016-{n:03d}" for n in range(1, 206)]
+    clamped = client.get("/api/dtrack/cases", params={"pageSize": 100, "page": 99}).json()
+    assert clamped["page"] == 3 and len(clamped["items"]) == 5
+    # A의 회신 직접 선택 목록과 응답 형태는 그대로다.
+    legacy = client.get("/api/cases", params={"limit": 30}).json()
+    assert len(legacy) == 30
+    assert set(legacy[0]) == {"caseId", "status", "subject", "fromEmail", "createdAt"}
+    detail = client.get(f"/api/cases/{ids[0]}").json()
+    assert len(detail["mails"]) == 2
+
+
+def test_dtrack_combined_filters_port_names_and_customer_literals(client, session):
+    _console_case(session, 1, customer="Alpha_100% 무역", status="정보부족")
+    _console_case(session, 2, customer="AlphaX1000 무역", status="정보부족")
+    _console_case(session, 3, customer="Alpha_100% 무역", status="계산완료", pod="AUSYD")
+    _console_case(session, 4, customer="신규 항구", pol="ZZABC", pod="ZZXYZ")
+    session.commit()
+    query = {"customer": " alpha_100% ", "status": "정보부족", "pol": "상하이", "pod": "부산"}
+    data = client.get("/api/dtrack/cases", params=query).json()
+    assert [c["caseId"] for c in data["items"]] == ["LQ-2026-1016-001"]
+    assert client.get("/api/dtrack/cases", params={"pol": "zzabc", "pod": "zzxyz"}).json()["total"] == 1
+    empty = client.get("/api/dtrack/cases", params={"customer": "없는 고객", "page": 5}).json()
+    assert empty["total"] == 0 and empty["page"] == 1 and empty["items"] == []
+
+
+def test_dtrack_date_range_is_inclusive_kst_registration_day(client, session):
+    for n, when in enumerate([
+        datetime(2026, 10, 15, 14, 59, 59, tzinfo=timezone.utc),
+        datetime(2026, 10, 15, 15, tzinfo=timezone.utc),
+        datetime(2026, 10, 16, 14, 59, 59, 999999, tzinfo=timezone.utc),
+        datetime(2026, 10, 16, 15, tzinfo=timezone.utc),
+    ], 1):
+        _console_case(session, n, when=when)
+    session.commit()
+    data = client.get("/api/dtrack/cases", params={"startDate": "2026-10-16", "endDate": "2026-10-16"}).json()
+    assert [c["caseId"] for c in data["items"]] == ["LQ-2026-1016-003", "LQ-2026-1016-002"]
+
+
+@pytest.mark.parametrize("sort,expected", [("customerName", [2, 1, 3]), ("status", [1, 3, 2]),
+                                           ("pol", [2, 1, 3]), ("pod", [2, 1, 3])])
+def test_dtrack_sort_keeps_missing_values_last(client, session, sort, expected):
+    _console_case(session, 1, customer="Bravo", status="수신", pol="KRPUS", pod="USLAX")
+    _console_case(session, 2, customer="Alpha", status="계산완료", pol="CNSHA", pod="KRPUS")
+    _console_case(session, 3, customer=None, status="보완대기")
+    session.commit()
+    data = client.get("/api/dtrack/cases", params={"sort": sort, "order": "asc"}).json()
+    assert [int(c["caseId"][-3:]) for c in data["items"]] == expected
+
+
+@pytest.mark.parametrize("params,code", [
+    ({"status": "임의 상태"}, 400), ({"startDate": "2026-10-17", "endDate": "2026-10-16"}, 400),
+    ({"startDate": "날짜 아님"}, 422), ({"page": 0}, 422), ({"pageSize": 101}, 422),
+    ({"sort": "drop table"}, 422), ({"order": "random"}, 422),
+])
+def test_dtrack_invalid_search_is_rejected(client, params, code):
+    assert client.get("/api/dtrack/cases", params=params).status_code == code
+
+
+def test_dtrack_read_only_and_all_statuses(client, session):
+    for n, status in enumerate(CASE_STATUSES, 1):
+        _console_case(session, n, status=status)
+    session.commit()
+    tables = [Case, QuoteInput, Mail, CaseEvent]
+    before = [session.scalar(select(func.count()).select_from(t)) for t in tables]
+    for status in CASE_STATUSES:
+        found = client.get("/api/dtrack/cases", params={"status": status}).json()
+        assert found["total"] == 1 and found["items"][0]["status"] == status
+    after = [session.scalar(select(func.count()).select_from(t)) for t in tables]
+    assert before == after
+    assert list(session.scalars(select(Case.status).order_by(Case.id))) == list(CASE_STATUSES)

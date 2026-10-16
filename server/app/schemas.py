@@ -87,6 +87,22 @@ class CaseSummary(CamelModel):
     created_at: datetime
 
 
+class CaseSearchItem(CaseSummary):
+    """D콘솔 조회용 응답. 기존 CaseSummary·DB 필드 정의는 바꾸지 않는다."""
+
+    customer_name: str | None = None
+    pol: str | None = None
+    pod: str | None = None
+
+
+class CaseSearchResult(CamelModel):
+    items: list[CaseSearchItem]
+    total: int
+    page: int
+    page_size: int
+    statuses: list[str]  # 정의서 6장의 값은 서버의 공통 목록에서 가져온다.
+
+
 class ExtractionState(CamelModel):
     """가장 최근 추출(파이프라인) 실행 상태 — 패널이 진행·결과·60초 기준을 보여줄 때 쓴다 (FR-101)."""
 

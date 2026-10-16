@@ -26,32 +26,55 @@
     </section>
 
     <main id="app-body" class="main" style="display: none;">
-        <p id="status" class="status" hidden></p>
+        <nav class="console-nav" aria-label="패널 화면">
+            <button id="console-nav-mail" type="button" aria-pressed="true">
+                <span aria-hidden="true">✉</span> 선택한 메일
+            </button>
+            <button id="console-nav-cases" type="button" aria-pressed="false">
+                <span aria-hidden="true">☷</span> 케이스 목록
+            </button>
+        </nav>
+
+        <div id="mail-workspace">
+        <p id="status" class="status" role="status" aria-live="polite" hidden></p>
 
         <!-- 작성 창에서 연 패널: 초안 마무리 (FR-304·505). 읽기 화면용 영역은 숨긴다 -->
         <section id="compose-section" class="card" hidden>
             <h2>초안 마무리</h2>
-            <p id="compose-state"></p>
+            <p id="compose-state" aria-live="polite"></p>
             <button id="compose-retry" class="button" hidden>다시 시도</button>
+            <p class="mail-help">받는 사람·제목·본문·첨부를 확인하고 Outlook에서 직접 보내세요.</p>
         </section>
 
         <div id="read-body">
+        <section id="mail-overview" class="mail-overview" aria-label="선택한 메일 정보" hidden>
+            <p class="mail-eyebrow">선택한 메일</p>
+            <h1 id="subject">-</h1>
+            <dl class="mail-data mail-meta">
+                <dt>발신자</dt><dd id="from">-</dd>
+                <dt id="received-at-label">수신 시각</dt><dd id="received-at">-</dd>
+            </dl>
+        </section>
         <!-- 케이스 등록 상태와 [케이스 생성] 버튼 (FR-101) -->
         <section id="case-section" class="card">
+            <div class="mail-section-heading">
+                <h2>케이스 처리</h2><span id="mail-case-status" class="console-badge" hidden></span>
+            </div>
             <p id="case-state" class="case-state"></p>
             <!-- 항목 추출 상태 (FR-101): 추출 중 → 완료/미연결/실패, 걸린 시간, 뽑힌 항목 -->
             <div id="extraction" class="extraction" hidden>
-                <p id="extraction-state"></p>
-                <dl id="extraction-result" class="fields fields--compact"></dl>
-                <button id="rerun-extraction" class="button extraction__rerun" hidden>다시 추출</button>
+                <div class="mail-extraction-heading">
+                    <p id="extraction-state" aria-live="polite"></p>
+                    <button id="rerun-extraction" class="button extraction__rerun" hidden>다시 추출</button>
+                </div>
+                <dl id="mail-validation-summary" class="mail-data mail-validation" hidden></dl>
+                <div id="mail-validation-issues" hidden></div>
+                <details id="mail-extracted-details" class="mail-disclosure" hidden>
+                    <summary>추출 항목 <span id="mail-field-count" class="mail-count"></span></summary>
+                    <dl id="extraction-result" class="fields fields--compact mail-data"></dl>
+                </details>
             </div>
             <button id="create-case" class="button button--primary" hidden>케이스 생성</button>
-        </section>
-
-        <!-- 케이스 자료: 저장된 메일 원문·첨부를 다시 열기 (FR-103) -->
-        <section id="files-section" class="card" hidden>
-            <h2>케이스 자료</h2>
-            <ul id="case-files" class="files"></ul>
         </section>
 
         <!-- 담당자가 보낸 [케이스ID] 메일: 발송 시각·수행자 기록 (FR-505) -->
@@ -64,12 +87,14 @@
         <!-- 초안 만들기 (FR-304·505): 읽기 화면에서는 작성 창을 띄우고, 작성 창에서는 그 메일을 채운다(작성 창에서는 코드가 초안 마무리 아래로 옮긴다), 발송은 담당자가 직접 한다 -->
         <section id="draft-section" class="card" hidden>
             <h2>메일 초안</h2>
-            <label for="questions" class="label">보완 요청 문항 (검증 결과로 자동 채움 · 고쳐도 됩니다, 한 줄에 하나)</label>
-            <textarea id="questions" rows="4" placeholder="예) 선적항(POL)을 알려 주세요."></textarea>
+            <label for="questions" class="label">보완 요청 문항</label>
+            <p id="questions-help" class="mail-help">검증 결과로 자동 채워집니다. 필요한 경우 한 줄에 한 문항씩 수정하세요.</p>
+            <textarea id="questions" rows="4" aria-describedby="questions-help" placeholder="예) 선적항(POL)을 알려 주세요."></textarea>
             <div class="buttons">
                 <button id="supplement-draft" class="button">보완 요청 초안 만들기</button>
-                <button id="quote-draft" class="button">견적서 송부 초안 만들기</button>
+                <button id="quote-draft" class="button button--primary">견적서 송부 초안 만들기</button>
             </div>
+            <p class="mail-help mail-send-note">발송은 Outlook의 [보내기] 버튼으로 담당자가 직접 진행합니다.</p>
         </section>
 
         <section id="reply-section" class="card" hidden>
@@ -83,31 +108,108 @@
             </details>
         </section>
 
-        <dl class="fields">
-            <dt>제목</dt>
-            <dd id="subject">-</dd>
+        <!-- 케이스 자료: 저장된 메일 원문·첨부를 다시 열기 (FR-103) -->
+        <section id="files-section" class="card" hidden>
+            <h2>케이스 자료</h2>
+            <ul id="case-files" class="files"></ul>
+        </section>
 
-            <dt>발신자</dt>
-            <dd id="from">-</dd>
-
-            <dt id="received-at-label">수신 시각</dt>
-            <dd id="received-at">-</dd>
-
-            <dt>본문 앞부분</dt>
-            <dd id="body-preview" class="preview">-</dd>
-
-            <dt>conversationId</dt>
-            <dd id="conversation-id" class="mono">-</dd>
-
-            <dt>internetMessageId</dt>
-            <dd id="internet-message-id" class="mono">-</dd>
-        </dl>
-
-        <details class="json">
-            <summary>메일 표준 JSON 보기</summary>
-            <pre id="snapshot-json"></pre>
-        </details>
+        <section id="mail-source-section" class="card mail-source" aria-label="메일 상세 정보" hidden>
+            <details class="mail-disclosure">
+                <summary>본문 앞부분</summary>
+                <p id="body-preview" class="preview">-</p>
+            </details>
+            <details class="mail-disclosure">
+                <summary>메일 연결 정보</summary>
+                <dl class="mail-data mail-identifiers">
+                    <dt>conversationId</dt><dd id="conversation-id" class="mono">-</dd>
+                    <dt>internetMessageId</dt><dd id="internet-message-id" class="mono">-</dd>
+                </dl>
+                <details class="json">
+                    <summary>메일 표준 JSON 보기</summary>
+                    <pre id="snapshot-json"></pre>
+                </details>
+            </details>
+        </section>
         </div>
+        </div>
+
+        <!-- D트랙: 저장된 케이스 조회. 현재 Outlook 메일의 처리 대상과 분리한다. -->
+        <section id="console-workspace" class="case-console" aria-label="케이스 조회" hidden>
+            <section id="console-list-view">
+                <div class="console-heading">
+                    <div><p class="console-eyebrow">케이스 관리</p><h1>케이스 목록</h1></div>
+                    <button id="console-refresh" type="button" class="console-button">새로고침</button>
+                </div>
+                <form id="console-search" class="console-search">
+                    <label class="console-filter-wide">고객
+                        <input name="customer" type="search" maxlength="300" placeholder="고객 회사명" autocomplete="off" />
+                    </label>
+                    <label>상태
+                        <select name="status" id="console-status-filter"><option value="">전체 상태</option></select>
+                    </label>
+                    <label>출발항 (POL)
+                        <input name="pol" maxlength="100" placeholder="항구명 또는 코드" autocomplete="off" />
+                    </label>
+                    <label>도착항 (POD)
+                        <input name="pod" maxlength="100" placeholder="항구명 또는 코드" autocomplete="off" />
+                    </label>
+                    <fieldset class="console-date-range">
+                        <legend>등록 기간 · 한국 시간</legend>
+                        <label><span class="console-sr-only">시작일</span><input name="startDate" type="date" /></label>
+                        <span aria-hidden="true">–</span>
+                        <label><span class="console-sr-only">종료일</span><input name="endDate" type="date" /></label>
+                    </fieldset>
+                    <div class="console-search-actions">
+                        <button type="reset" class="console-button">초기화</button>
+                        <button type="submit" class="console-button console-button-primary">검색</button>
+                    </div>
+                    <div class="console-sort">
+                        <label>정렬
+                            <select name="sort" aria-label="정렬 항목">
+                                <option value="createdAt">등록일</option><option value="customerName">고객</option>
+                                <option value="status">상태</option><option value="pol">출발항</option><option value="pod">도착항</option>
+                            </select>
+                        </label>
+                        <label><span class="console-sr-only">정렬 방향</span>
+                            <select name="order"><option value="desc">내림차순</option><option value="asc">오름차순</option></select>
+                        </label>
+                    </div>
+                </form>
+                <p id="console-list-message" class="console-message" role="status" aria-live="polite"></p>
+                <ul id="console-case-list" class="console-case-list" aria-label="검색 결과"></ul>
+                <div class="console-pagination">
+                    <button id="console-prev" type="button" class="console-button" disabled>이전</button>
+                    <span id="console-page-label">1 / 1 페이지</span>
+                    <button id="console-next" type="button" class="console-button" disabled>다음</button>
+                </div>
+            </section>
+
+            <section id="console-detail-view" hidden>
+                <div class="console-detail-toolbar">
+                    <button id="console-back" type="button" class="console-button">← 목록으로</button>
+                    <button id="console-detail-refresh" type="button" class="console-button">새로고침</button>
+                </div>
+                <p id="console-detail-message" class="console-message" role="status" aria-live="polite" hidden></p>
+                <div id="console-detail-content" hidden>
+                    <div id="console-detail-heading"></div>
+                    <div class="console-tabs" role="tablist" aria-label="케이스 상세">
+                        <button id="console-tab-fields" type="button" role="tab" data-console-tab="fields" aria-controls="console-panel-fields" aria-selected="true">항목·검증</button>
+                        <button id="console-tab-quote" type="button" role="tab" data-console-tab="quote" aria-controls="console-panel-quote" aria-selected="false" tabindex="-1">견적서</button>
+                        <button id="console-tab-files" type="button" role="tab" data-console-tab="files" aria-controls="console-panel-files" aria-selected="false" tabindex="-1">자료</button>
+                        <button id="console-tab-history" type="button" role="tab" data-console-tab="history" aria-controls="console-panel-history" aria-selected="false" tabindex="-1">이력</button>
+                    </div>
+                    <section id="console-panel-fields" role="tabpanel" aria-labelledby="console-tab-fields" tabindex="0"></section>
+                    <section id="console-panel-quote" role="tabpanel" aria-labelledby="console-tab-quote" tabindex="0" hidden></section>
+                    <section id="console-panel-files" role="tabpanel" aria-labelledby="console-tab-files" tabindex="0" hidden></section>
+                    <section id="console-panel-history" role="tabpanel" aria-labelledby="console-tab-history" tabindex="0" hidden></section>
+                    <div class="console-mail-link">
+                        <p id="console-mail-hint"></p>
+                        <button id="console-return-mail" type="button" class="console-button">선택한 메일로 돌아가기</button>
+                    </div>
+                </div>
+            </section>
+        </section>
     </main>
 </body>
 
