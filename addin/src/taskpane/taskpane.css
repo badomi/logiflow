@@ -398,7 +398,7 @@ textarea {
 .console-detail-id { display: flex; justify-content: space-between; align-items: start; gap: 8px; margin-bottom: 7px; }
 .console-detail-summary h1, .console-detail-subject { overflow-wrap: anywhere; }
 .console-detail-subject { margin: 8px 0; color: #5d7791; font-size: 12px; }
-.console-detail-meta { color: #6f859b; font-size: 11px; }
+.console-detail-meta { color: #6f859b; font-size: 11px; overflow-wrap: anywhere; }
 .console-tabs { display: flex; border-bottom: 1px solid #d5e0ec; margin-bottom: 18px; gap: 0; }
 .console-tabs button { flex: 1; min-width: 0; border: 0; border-bottom: 2px solid transparent; background: #fff; padding: 12px 3px 10px; font: inherit; font-size: 12px; color: #6a8099; cursor: pointer; }
 .console-tabs button[aria-selected="true"] { border-bottom-color: #204b7a; color: #183e70; font-weight: 700; }
