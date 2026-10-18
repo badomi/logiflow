@@ -746,7 +746,16 @@ const consoleFieldLabels: Record<string, string> = {
   volume: "부피·박스 규격",
 };
 
-/** FR-301: C의 issues/hold를 그대로 표시한다. 심각도나 보완 문항을 여기서 다시 판정하지 않는다. */
+/** 담당자용 검증 문구에서 요구사항 번호만 숨긴다. 서버 응답·원본 판단 로그는 변경하지 않는다. */
+function validationDisplayMessage(message: string): string {
+  return message
+    .replace(/\(\s*N?FR-\d{2,3}(?:\s*[·,/]\s*(?:N?FR-)?\d{2,3})*\s*\)/gi, "")
+    .replace(/\bN?FR-\d{2,3}\b(?:\s*[·,/]\s*(?:N?FR-)?\d{2,3}\b)*/gi, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+/** FR-301: C의 판정을 표시한다. 요구사항 번호만 숨기고 심각도나 보완 문항은 다시 판정하지 않는다. */
 function validationIssuesPanel(value: unknown): HTMLElement | null {
   const validation = consoleRecord(value);
   const groups: [string, Record<string, unknown>[]][] = [
@@ -783,7 +792,7 @@ function validationIssuesPanel(value: unknown): HTMLElement | null {
       const label = fields.map((field) => consoleFieldLabels[field] || field).join(" · ");
       if (label) heading.append(consoleNode("strong", "validation-field", label));
       heading.append(badge(levelOf(item)));
-      row.append(heading, consoleNode("p", "validation-message", typeof item.message === "string" ? item.message : "사유 미기록"));
+      row.append(heading, consoleNode("p", "validation-message", typeof item.message === "string" ? validationDisplayMessage(item.message) : "사유 미기록"));
       list.append(row);
     }
     section.append(list);
