@@ -1160,7 +1160,6 @@ function renderConsoleHistory(detail: CaseDetail) {
     return;
   }
   const list = consoleNode("ol", "console-history");
-  const activeQuote = consoleRecord(consoleRecord(detail.extraction.validation).quote);
   const records = consoleEventRecords(detail);
   const events = records.map(({ event }) => event);
   panel.append(consoleNode("p", "console-history-help", "기록 시각순입니다. 발송 이력에는 실제 발송 시각을 함께 표시합니다."));
@@ -1194,14 +1193,19 @@ function renderConsoleHistory(detail: CaseDetail) {
       links.append(files);
     }
     const recordedQuote = consoleRecord(consoleRecord(data.validation).quote);
-    // 이전 이력에 최신 견적 파일을 잘못 연결하지 않는다.
-    if (recordedQuote.version != null && recordedQuote.version === activeQuote.version) {
+    // 각 이력에 저장된 당시 파일만 연결한다. 경로가 없으면 최신 견적으로 대신하지 않는다.
+    if (recordedQuote.version != null) {
+      let linkedFiles = 0;
       for (const [key, label] of [["pdf", "견적서 PDF"], ["file", "견적서 Excel"]]) {
-        const link = consoleQuoteLink(detail.caseId, activeQuote[key], label);
-        if (link) links.append(link);
+        const link = consoleQuoteLink(detail.caseId, recordedQuote[key], `${label} · Rev. ${consoleValue(recordedQuote.version)}`);
+        if (link) {
+          links.append(link);
+          linkedFiles++;
+        }
       }
-    } else if (recordedQuote.version != null) {
-      entry.append(consoleNode("p", "console-history-help", `Rev. ${consoleValue(recordedQuote.version)} 생성 기록입니다. 이 이력의 견적 파일 조회는 현재 제공되지 않습니다.`));
+      if (!linkedFiles) {
+        entry.append(consoleNode("p", "console-history-help", `Rev. ${consoleValue(recordedQuote.version)} 생성 기록입니다. 당시 견적 파일 경로가 기록되지 않았습니다.`));
+      }
     }
     const output = historyOutput(event, mail);
     if (output) {
